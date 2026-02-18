@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <base target="_top">
+    <meta charset="UTF-8" />
+    <script>
+      window.MathJax = {
+        tex: {
+          inlineMath: [['$', '$'], ['$$', '$$'], ['\\(', '\\)'], ['\(', '\)']]
+        },
+        svg: { fontCache: 'global' }
+      };
+    </script>
+    <script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js" async></script>
+
+    <style>
+      body {
+        font-family: system-ui, -apple-system, sans-serif;
+        font-size: 14px;
+        padding: 10px;
+        line-height: 1.6;
+        background-color: #f8f9fa;
+      }
+      #meta {
+        font-size: 11px;
+        color: #1a73e8;
+        font-weight: bold;
+        margin-bottom: 10px;
+        position: sticky;
+        top: 0;
+        background: #f8f9fa;
+        padding: 5px 0;
+      }
+      .cell-item {
+        background: #fff;
+        border: 1px solid #ddd;
+        border-radius: 6px;
+        padding: 12px;
+        margin-bottom: 15px;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+      }
+      .cell-address {
+        font-size: 10px;
+        color: #888;
+        border-bottom: 1px dashed #eee;
+        margin-bottom: 8px;
+        display: block;
+      }
+      .cell-content {
+        white-space: normal;
+        word-break: break-word;
+      }
+      hr {
+        border: 0;
+        height: 1px;
+        background: #e0e0e0;
+        margin: 20px 0;
+      }
+      #loading { color: #999; text-align: center; display: block; margin-top: 20px; }
+    </style>
+  </head>
+  <body>
+    <div id="meta">선택 범위 미리보기</div>
+    <div id="container">
+      <span id="loading">데이터를 불러오는 중...</span>
+    </div>
+
+    <script>
+      let lastRange = "";
+
+      function renderRange(res) {
+        const container = document.getElementById('container');
+        
+        // 선택 범위가 이전과 같고 내용도 같다면 굳이 다시 그리지 않음 (깜빡임 방지)
+        const currentRange = res.sheetName + "!" + res.rangeAddress;
+        
+        // 컨텐츠 생성
+        let htmlBuffer = "";
+        res.contents.forEach((item, index) => {
+          htmlBuffer += `
+            <div class="cell-item">
+              <span class="cell-address">${item.address}</span>
+              <div class="cell-content">
+                ${item.value.replace(/\n/g, '<br>') || '<span style="color:#ccc">빈 셀</span>'}
+              </div>
+            </div>
+          `;
+          // 마지막 셀이 아니면 가로 바 추가
+          if (index < res.contents.length - 1) {
+            htmlBuffer += '<hr>';
+          }
+        });
+
+        container.innerHTML = htmlBuffer;
+
+        // MathJax 렌더링
+        if (window.MathJax && window.MathJax.typesetPromise) {
+          window.MathJax.typesetPromise([container]).catch(err => console.error(err));
+        }
+      }
+
+      function fetchData() {
+        google.script.run
+          .withSuccessHandler(renderRange)
+          .getActiveRangeContents();
+      }
+
+      // 초기 실행 및 주기적 갱신
+      fetchData();
+      setInterval(fetchData, 2000); // 범위를 많이 잡을 수 있으므로 주기를 약간 늘림(2초)
+    </script>
+  </body>
+</html>
