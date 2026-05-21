@@ -65,42 +65,62 @@ const _MPB = (function () {
 
 
 
-  // ===== 수동 단발 처리 =====
+  // ===== C열 빈 행 자동 탐색 + 변환 =====
   function runRange_() {
     const ui = SpreadsheetApp.getUi();
     const sh = getSheet_();
     if (!sh) { ui.alert(`시트 "${CFG.SHEET_NAME}" 없음`); return; }
     ensureHeader_(sh);
 
-    const resp = ui.prompt('변환 범위', '예: 2-100 (단일 행이면 5)', ui.ButtonSet.OK_CANCEL);
-    if (resp.getSelectedButton() !== ui.Button.OK) return;
+    const lastRow = sh.getLastRow();
+    if (lastRow < 2) { ui.alert('변환할 데이터가 없습니다.'); return; }
 
-    const input = (resp.getResponseText()||'').trim();
-    let s,e, m = input.match(/^\s*(\d+)\s*-\s*(\d+)\s*$/);
-    if (m) { s=+m[1]; e=+m[2]; } else if (/^\d+$/.test(input)) { s=+input; e=s; }
-    else { ui.alert('형식 오류. 예: 2-100 또는 5'); return; }
-    if (e < s) [s,e] = [e,s];
+    // 2행~마지막행까지 B열(drive_link)과 C열(latex)을 한꺼번에 읽어
+    // "B열(링크)은 있지만 C열(결과)이 비어 있는 행"을 대상으로 선별
+    const data = sh.getRange(2, 1, lastRow - 1, 8).getValues(); // A~H
+    const targetRows = [];
+    for (let i = 0; i < data.length; i++) {
+      const linkOrId = (data[i][CFG.COLS.drive_link - 1] || '').toString().trim();
+      const latex    = (data[i][CFG.COLS.latex - 1]      || '').toString().trim();
+      if (linkOrId && !latex) targetRows.push(i + 2); // 실제 행번호
+    }
+
+    if (targetRows.length === 0) {
+      ui.alert('변환할 행이 없습니다.\n(C열이 비어있고 B열에 링크가 있는 행이 없음)');
+      return;
+    }
+
+    // 확인 후 실행
+    const confirm = ui.alert(
+      'Latex 변환',
+      `C열이 비어있는 ${targetRows.length}개 행을 변환합니다.\n` +
+      `대상 행: ${targetRows.length <= 20
+        ? targetRows.join(', ')
+        : targetRows.slice(0, 20).join(', ') + ' … 외 ' + (targetRows.length - 20) + '개'}`,
+      ui.ButtonSet.OK_CANCEL
+    );
+    if (confirm !== ui.Button.OK) return;
 
     const lock = LockService.getScriptLock(); lock.waitLock(30000);
-    let success = 0, total = 0;
+    let success = 0, fail = 0;
+    const errors = []; // 실패 행 기록용
     try {
       const creds = getMathpixCreds_();
-      s = Math.max(2, s); e = Math.min(sh.getLastRow(), e);
-      if (e < s) { ui.alert('해당 구간에 데이터가 없습니다.'); return; }
 
-      for (let row=s; row<=e; row++) {
-        total++;
+      for (const row of targetRows) {
         try {
-          const vals = sh.getRange(row,1,1,8).getValues()[0];
-          const linkOrId = (vals[CFG.COLS.drive_link-1]||'').toString().trim();
+          const vals = sh.getRange(row, 1, 1, 8).getValues()[0];
+          const linkOrId = (vals[CFG.COLS.drive_link - 1] || '').toString().trim();
 
-          const attempts = Number(vals[CFG.COLS.attempts-1]||0) + 1;
+          const attempts = Number(vals[CFG.COLS.attempts - 1] || 0) + 1;
           sh.getRange(row, CFG.COLS.attempts).setValue(attempts);
           sh.getRange(row, CFG.COLS.status).setValue('in_progress');
           sh.getRange(row, CFG.COLS.processed_at).setValue(new Date());
 
           if (!linkOrId) {
-            writeRowResult_(sh,row,{latex:'',text:'',status:'error',attempts,last_error:'missing_drive_link',processed_at:new Date()});
+            writeRowResult_(sh, row, {latex:'',text:'',status:'error',attempts,last_error:'missing_drive_link',processed_at:new Date()});
+            fail++;
+            errors.push(row + '행: 링크 없음');
             continue;
           }
 
@@ -131,13 +151,28 @@ const _MPB = (function () {
           success++;
 
         } catch (e) {
-          writeRowResult_(sh,row,{latex:'',text:'',status:'error',
-            attempts:Number(sh.getRange(row,CFG.COLS.attempts).getValue()||0)||1,
+          fail++;
+          const errMsg = String(e).slice(0, 200);
+          errors.push(row + '행: ' + errMsg);
+          writeRowResult_(sh, row, {latex:'',text:'',status:'error',
+            attempts:Number(sh.getRange(row, CFG.COLS.attempts).getValue()||0)||1,
             last_error:String(e).slice(0,500), processed_at:new Date()});
         }
         Utilities.sleep(200);
       }
-      ui.alert(`완료: ${success}/${total} 행 성공`);
+
+      // 결과 보고
+      let report = `✅ Latex 변환 완료\n\n` +
+        `대상: ${targetRows.length}개 행\n` +
+        `성공: ${success}개\n` +
+        `실패: ${fail}개`;
+      if (errors.length > 0) {
+        const shown = errors.slice(0, 10);
+        report += '\n\n--- 실패 상세 ---\n' + shown.join('\n');
+        if (errors.length > 10) report += '\n… 외 ' + (errors.length - 10) + '건';
+      }
+      ui.alert('변환 결과', report, ui.ButtonSet.OK);
+
     } finally { lock.releaseLock(); }
   }
 

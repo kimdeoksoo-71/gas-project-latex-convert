@@ -1,12 +1,9 @@
 /*************************************************
- * 해설 병합+Split (수정 버전)
- * - 입력: "해설 Alert 상자" 1회 (예: 2,100 / 2-100 / 2 ~ 100 / 2 100)
- * - 병합: Data_Latex!C[시작~끝] → split_12!E2
- * - 분할: (줄바꿈 + 1~2자리수 + ". ") 패턴 기준
- * - 기록: split_12!B14 ~ B25 (총 12칸)
+ * 해설 병합+Split → split_12!B14~B25
+ * - A열 파일명에서 해설 행(_해 / _해설 / _풀이) 자동 탐색
+ * - split_12!A1 텍스트로 특정 문제지만 필터링
  *************************************************/
 
-/** 메인 실행 함수 */
 function mergeSolutionAndSplit_to_split12() {
   const ui = SpreadsheetApp.getUi();
   const ss = SpreadsheetApp.getActive();
@@ -17,37 +14,20 @@ function mergeSolutionAndSplit_to_split12() {
   if (!src) throw new Error('Data_Latex 시트를 찾을 수 없습니다.');
   if (!dst) throw new Error('split_12 시트를 찾을 수 없습니다.');
 
-  // ===== 1) 행 범위 입력 (해설 Alert 상자 1회) =====
-  const range = promptRange_(
-    '해설 Alert 상자',
-    '해설의 시작/끝 행을 입력하세요 (예: 2,100  /  2-100  /  2 ~ 100  /  2 100)'
-  );
-  if (range === null) return; // 취소
-  let { startRow, endRow } = range;
+  const keyword = String(dst.getRange('A1').getValue() || '').trim();
+  const rows = findSolutionRows_(keyword);
 
-  // 보정: 뒤집힌 입력은 자동 교환
-  if (endRow < startRow) [startRow, endRow] = [endRow, startRow];
-
-  if (startRow <= 0 || endRow <= 0) {
-    ui.alert('행 번호는 양의 정수여야 합니다.');
+  if (rows.length === 0) {
+    ui.alert(keyword
+      ? `Data_Latex A열에서 "${keyword}"를 포함한 해설 행을 찾을 수 없습니다.`
+      : 'Data_Latex A열에서 해설 행(_해 또는 _해설 또는 _풀이)을 찾을 수 없습니다.');
     return;
   }
 
-  // ===== 2) Data_Latex!C에서 병합 → split_12!E2 =====
-  const numRows = endRow - startRow + 1;
-  const values = src.getRange(startRow, 3, numRows, 1).getValues()  // 3 = C열
-    .map(r => (r[0] == null ? '' : String(r[0])));
+  const combined = readAndMergeCValues_(rows);
+  safeCellWrite_(dst.getRange('E2'), combined);
 
-  const combined = values.join('\n');
-  dst.getRange('E2').setValue(combined);
-
-  // ===== 3) 같은 기준으로 split → split_12!B14~B25 =====
-  // 기준(2종):
-  //  A) "줄바꿈 + 1~2자리 숫자 + '.' + 공백(1개 이상)"
-  //  B) "줄바꿈 + 1~2자리 숫자 + ')' + 공백(1개 이상)"
-
-  const re = /(?:^|\r?\n)(\d{1,2}\s*(?:\.\s+|\)\s+)[\s\S]*?)(?=(?:\r?\n)\d{1,2}\s*(?:\.\s+|\)\s+)|$)/g;
-
+  const re = /(?:^|\r?\n)(\d{1,2}\.?[ \t]*\r?\n[\s\S]*?)(?=\r?\n\d{1,2}\.?[ \t]*\r?\n|$)/g;
   const segments = [];
   let m;
   while ((m = re.exec(combined)) !== null) {
@@ -55,7 +35,6 @@ function mergeSolutionAndSplit_to_split12() {
     if (seg) segments.push(seg);
   }
 
-  // 기록 범위: B14 ~ B25 (총 12칸)
   const START_ROW = 14;
   const MAX_ROWS  = 12;
   dst.getRange(START_ROW, 2, MAX_ROWS, 1).clearContent();
@@ -65,30 +44,13 @@ function mergeSolutionAndSplit_to_split12() {
     dst.getRange(START_ROW, 2, toWrite.length, 1).setValues(toWrite);
   }
 
-  // 완료 안내
   const info =
-    `해설 병합 범위: C${startRow}~C${endRow}\n` +
+    (keyword ? `필터: "${keyword}"\n` : '') +
+    `대상 행: ${rows.length}개 (${rows[0]}~${rows[rows.length-1]}행)\n` +
+    `병합 텍스트: ${combined.length.toLocaleString()}자\n` +
     `추출된 블록 개수: ${segments.length}\n` +
     (segments.length > MAX_ROWS
       ? `주의: 최대 ${MAX_ROWS}개까지만 B${START_ROW}~B${START_ROW + MAX_ROWS - 1}에 기록되었습니다.`
       : `기록 범위: B${START_ROW}~B${START_ROW + toWrite.length - 1}`);
   ui.alert('완료', info, ui.ButtonSet.OK);
-}
-
-/** 범위를 한 번에 입력받아 파싱 (취소 시 null) */
-function promptRange_(title, message) {
-  const ui = SpreadsheetApp.getUi();
-  const res = ui.prompt(title, message, ui.ButtonSet.OK_CANCEL);
-  if (res.getSelectedButton() !== ui.Button.OK) return null;
-
-  // 쉼표, 하이픈, 물결, 콜론, 공백 등 다양한 구분자 허용
-  const raw = (res.getResponseText() || '').trim();
-  const nums = raw.split(/[\s,;:~\-]+/).filter(Boolean).map(v => parseInt(v, 10));
-
-  if (nums.length < 2 || !Number.isFinite(nums[0]) || !Number.isFinite(nums[1])) {
-    ui.alert('형식이 올바르지 않습니다. 예: 2,100  /  2-100  /  2 ~ 100  /  2 100');
-    return null;
-  }
-
-  return { startRow: nums[0], endRow: nums[1] };
 }
