@@ -16,7 +16,8 @@ function onOpen() {
     .addItem('❇️ Latex 초기화', 'clear_Data1_and_Data_Latex_rows2down')
     .addSeparator()
     .addItem('✳️ 문항찾기 : 키워드', 'runSearchAndAppend')
-    .addItem('✅ Latex 변환', 'mpb_runRange')
+    .addItem('🔄 Latex 변환 : 행범위(자동 이어하기)', 'mpr_runRangeAuto')
+    .addItem('⏹️ 자동변환 중지', 'mpr_stopAuto')
     .addItem('➕ CRUX 홀짝행 번호추가','addQuestionNumberPrefixToColumnC_byOddEven_InRangeIndex');
 
   // 6. 서브메뉴 B

@@ -27,7 +27,7 @@ function mergeSolutionAndSplit_to_split38() {
   const combined = readAndMergeCValues_(rows);
   safeCellWrite_(dst.getRange('E2'), combined);
 
-  const re = /(?:^|\r?\n)(\d{1,2}\.?[ \t]*\r?\n[\s\S]*?)(?=\r?\n\d{1,2}\.?[ \t]*\r?\n|$)/g;
+  const re = /(?:^|\r?\n)(\d{1,2}\s*[.)）．]?\s*정답[\s\S]*?)(?=(?:\r?\n)\d{1,2}\s*[.)）．]?\s*정답|$)/g;
   const segments = [];
   let m;
   while ((m = re.exec(combined)) !== null) {
