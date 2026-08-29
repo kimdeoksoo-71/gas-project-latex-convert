@@ -22,6 +22,9 @@ function onOpen() {
 
   // 6. 서브메뉴 B
   const subMenuB = ui.createMenu('문항해설 분리/병합')
+    .addItem('🚀 Data_Latex → Data_DS (문제·해설 짝 전송 + 정답 추출)', 'dl_sendPairsToDataDS')
+    .addItem('🎯 Data_DS 정답(D) 채우기 : 행범위', 'ds_fillGivenAnswer_byRowInput')
+    .addSeparator()
     .addItem('Split38 문제', 'mergeLatexAndSplit_to_split38')
     .addItem('Split38 해설', 'mergeSolutionAndSplit_to_split38')
     .addItem('Split38 을 Data_DS로','append_split38_to_DataDS')
@@ -35,6 +38,7 @@ function onOpen() {
     .addItem('Split46을 Data_DS로','append_split46_to_DataDS')
     .addSeparator()
     .addItem('SplitN 문제&해설','mergeAndSplitLatex');
+ 
 
   // 7. 메인 메뉴에 서브메뉴들 통합 + UI 반영
   mainMenu

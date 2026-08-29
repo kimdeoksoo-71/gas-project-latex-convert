@@ -84,12 +84,12 @@ function safeCellWrite_(cell, text) {
  * split 시트 초기화 / Data_DS 유틸 (공용)
  *************************************************/
 
-/** split 시트 초기화: A1 지우기 + B/D/E/G/H열 2행 이하 지우기 */
+/** split 시트 초기화: A1 지우기 + B/D/E열 2행 이하 지우기 (G/H열은 보존) */
 function clearSplitSheet_(sheet) {
   const maxRows = sheet.getMaxRows();
   sheet.getRange('A1').clearContent();
   if (maxRows < 2) return;
-  [2, 4, 5, 7, 8].forEach(col => {
+  [2, 4, 5].forEach(col => {  // G(7), H(8)열은 제외하여 보존
     sheet.getRange(2, col, maxRows - 1, 1).clearContent();
   });
 }
