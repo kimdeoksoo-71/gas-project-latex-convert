@@ -9,7 +9,10 @@ function onOpen() {
   mainMenu.addItem('첫번째 셀로 합치기','mergeSelectedCellsToTopAndClearRest');
   mainMenu.addItem('⏺️ 문항 정규화', 'ds_runNormalizeAndValidate_byRowInput');
   mainMenu.addSeparator();
-
+  mainMenu.addItem('▶ 원클릭 파이프라인 (키워드 → Data_DS)', 'pipeline_start');
+  mainMenu.addItem('⏹ 파이프라인 중지', 'pipeline_stop');
+  mainMenu.addItem('📋 파이프라인 상태', 'pipeline_status');
+  mainMenu.addSeparator();
 
   // 5. 서브메뉴 A
   const subMenuA = ui.createMenu('Latex 변환')

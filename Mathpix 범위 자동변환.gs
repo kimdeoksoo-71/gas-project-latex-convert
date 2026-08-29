@@ -187,7 +187,65 @@ const _MPR = (function () {
       try { lock.releaseLock(); } catch (_) {}
     }
   }
+    /** ===== 파이프라인용: 지정 행들을 deadline 까지 변환 (UI·트리거 없음) =====
+   *  rows: 행 번호 배열 / deadlineMs: Date.now() 기준 절대시각
+   *  반환: { attempted, ok, err, stoppedByTime }
+   */
+  function convertRows_(rows, deadlineMs) {
+    const sh = getSheet_();
+    if (!sh) throw new Error(`시트 "${CFG.SHEET_NAME}" 없음`);
+    const creds = getMathpixCreds_();
+    const out = { attempted: 0, ok: 0, err: 0, stoppedByTime: false };
 
+    for (const row of rows) {
+      if (Date.now() > deadlineMs) { out.stoppedByTime = true; break; }
+      out.attempted++;
+
+      const vals = sh.getRange(row, 1, 1, 8).getValues()[0];
+      const attempts = Number(vals[CFG.COLS.attempts - 1] || 0);
+      const linkOrId = String(vals[CFG.COLS.drive_link - 1] || '').trim();
+
+      try {
+        sh.getRange(row, CFG.COLS.attempts).setValue(attempts + 1);
+        sh.getRange(row, CFG.COLS.status).setValue('in_progress');
+
+        if (!linkOrId) {
+          sh.getRange(row, CFG.COLS.status).setValue('error');
+          sh.getRange(row, CFG.COLS.last_error).setValue('missing_drive_link');
+          sh.getRange(row, CFG.COLS.processed_at).setValue(new Date());
+          out.err++; continue;
+        }
+
+        const fileId = extractFileId_(linkOrId);
+        const blob = DriveApp.getFileById(fileId).getBlob();
+        const dataUrl = 'data:' + blob.getContentType() + ';base64,' + Utilities.base64Encode(blob.getBytes());
+
+        const result = callMathpix_(creds, {
+          src: dataUrl,
+          formats: ['text'],
+          rm_spaces: true,
+          math_inline_delimiters: ['$', '$'],
+          math_block_delimiters: ['$$', '$$'],
+          enable_tables: true,
+          confidence_threshold: 0.0
+        });
+
+        sh.getRange(row, CFG.COLS.latex).setValue(result.text || '');
+        sh.getRange(row, CFG.COLS.status).setValue('done');
+        sh.getRange(row, CFG.COLS.last_error).setValue('');
+        sh.getRange(row, CFG.COLS.processed_at).setValue(new Date());
+        out.ok++;
+
+      } catch (err) {
+        sh.getRange(row, CFG.COLS.status).setValue('error');
+        sh.getRange(row, CFG.COLS.last_error).setValue(String(err).slice(0, 500));
+        sh.getRange(row, CFG.COLS.processed_at).setValue(new Date());
+        out.err++;
+      }
+      Utilities.sleep(200);
+    }
+    return out;
+  }
   /** ===== 중지 ===== */
   function stop_() {
     const sp = PropertiesService.getScriptProperties();
@@ -198,10 +256,11 @@ const _MPR = (function () {
     try { SpreadsheetApp.getUi().alert('자동변환을 중지했습니다.'); } catch (_) {}
   }
 
-  return { start_, stop_, processBatch_ };
+  return { start_, stop_, processBatch_, convertRows_ };
 })();
 
 /** ===== 전역 래퍼 (메뉴/트리거용) ===== */
 function mpr_runRangeAuto() { _MPR.start_(); }
 function mpr_stopAuto()     { _MPR.stop_(); }
 function mpr__continueRange() { _MPR.processBatch_(); } // 트리거가 호출
+function mpr_convertRows(rows, deadlineMs) { return _MPR.convertRows_(rows, deadlineMs); } // 파이프라인용

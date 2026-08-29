@@ -22,7 +22,7 @@
  *  의존(기존 파일의 전역 함수):
  *   clearBelowHeader_            (Data1, Data_Latex 초기화.gs)
  *   getFolderByPath, collectPngNameUrlPairs (링크&파일명 추출(키워드).gs)
- *   mpb_convertRows              (MathPix API로 Latex 변환.gs — 아래 패치 필요)
+ *   mpr_convertRows              (Mathpix 범위 자동변환.gs — _MPR 에 패치 필요)
  *   dlds_parseFilename_, dlds_lastDataRow_, ds_fillGivenAnswerRows_, DLDS (DataLatex_to_DataDS.gs)
  *   parseMcqFromRaw_, detectAnswerTypeFromChoices_, normalizeChoiceToLatex_,
  *   normalizeComboChoice_, writeNormResult_, DSN (normalizeProblem.gs)
@@ -39,7 +39,7 @@ const PL = {
   SRC_SHEET: 'Data_Latex',
   DST_SHEET: 'Data_DS',
   LOG_SHEET: 'Pipeline_Log',
-  MAX_ATTEMPTS: 5,                 // Latex 변환 재시도 상한 (attempts 열 기준)
+  MAX_ATTEMPTS: 3,                 // Latex 변환 재시도 상한 (_MPR.CFG.MAX_ATTEMPTS 와 동일하게)
   NORMALIZE_BEFORE_ANSWER: true,
   EMAIL_ON_FINISH: true            // 트리거로 끝났을 때(알림창 불가) 메일로 결과 통지
 };
@@ -187,7 +187,7 @@ function pl_runStage_(st, deadline) {
         st.stage = 'send'; return 'next';
       }
       // 마지막 행 처리 중 6분 초과 방지: 재시도 포함 최대 대기를 감안해 여유를 둔다
-      const r = mpb_convertRows(rows, deadline - 40 * 1000);
+      const r = mpr_convertRows(rows, deadline - 40 * 1000);
       st.latex.ok += r.ok; st.latex.err += r.err;
       pl_log_(st, 'latex', `이번 회차 ${r.attempted}행 시도 (성공 ${r.ok}, 실패 ${r.err}) / 남은 대상 ${rows.length - r.attempted}`);
       return r.stoppedByTime ? 'yield' : 'next';   // 'next' 면 다시 latex 로 들어와 남은 행(재시도 포함) 확인
