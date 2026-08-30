@@ -4,11 +4,39 @@
  * - 실행시간 한도(6분) 도달 전에 스스로 중단하고
  *   1분 뒤 트리거로 자동 재개 → 전체 완료까지 무인 진행
  * - status='done' 행은 건너뛰므로 중복 처리 없음
+ *
+ * [패치 1 · diagram 감지]
+ * - Mathpix 호출에 include_line_data:true 를 추가하고,
+ *   응답 line_data 중 type 이 diagram/chart 인 항목의 윤곽(cnt)을
+ *   바운딩 박스로 환산해 Data_Latex 에 기록한다.
+ *     I열 has_diagram   : TRUE / FALSE
+ *     J열 diagram_boxes : JSON  {"w":이미지폭,"h":이미지높이,"n":개수,
+ *                               "boxes":[{"type":"diagram","subtype":"","x":..,"y":..,"w":..,"h":..},...]}
+ *   (x,y,w,h 는 원본 이미지 기준 픽셀. 자르기 단계에서 여백을 더해 사용)
+ * - 헤더(I1/J1)가 비어 있으면 자동으로 채운다.
+ * - 디버그용 mpr_debugLineData(): 행 하나를 골라 line_data 타입 요약을 로그/알림으로 확인
+ *
+ * [패치 4 · 그림 추출 통합]  (Mathpix 그림 추출.gs 의 _MPF 가 있어야 동작, 없으면 조용히 건너뜀)
+ * - OCR 후 has_diagram=TRUE 이면 같은 자리에서 _MPF 로 문항 PDF 를 v3/pdf 에 보내 그림을 받아온다.
+ * - 그림까지 끝나야 status='done'. Mathpix 가 아직 처리 중이면 status='fig_pending' 으로 두고
+ *   다음 배치(트리거 재개 / Pipeline 의 다음 회차)에서 OCR 없이 그림 수집만 이어서 한다.
+ *   → Pipeline 은 status≠done 행을 다시 넘겨주므로 Pipeline.gs 수정 없이 그림까지 완료된 뒤 send 단계로 넘어간다.
+ * - PDF 가 없거나(no_pdf) 그림 단계가 실패(error)하면 파이프라인을 막지 않도록 status='done' 으로 두고
+ *   L열 fig_status 에만 사유를 남긴다 (나중에 메뉴 "그림 추출"로 따로 재시도).
+ * - _MPF.CFG.INTO_LATEX=true(기본) 이면 그림이 1개 이상 저장된 행은 C열(latex)을 O열(latex_fig,
+ *   \includegraphics 포함)로 바꾸고, 원래 v3/text 결과는 D열(text)에 보관한다.
  *************************************************/
 const _MPR = (function () {
   const CFG = {
     SHEET_NAME: 'Data_Latex',
-    COLS: { filename:1, drive_link:2, latex:3, text:4, status:5, attempts:6, last_error:7, processed_at:8 },
+    COLS: { filename:1, drive_link:2, latex:3, text:4, status:5, attempts:6, last_error:7, processed_at:8,
+            has_diagram:9, diagram_boxes:10 },
+    FIG: {
+      ENABLED: true,            // OCR 직후 그림 추출까지 한 번에 (C열 교체 여부는 _MPF.CFG.INTO_LATEX)
+      MAX_WAIT_MS: 150 * 1000   // 한 행의 그림 처리를 기다리는 최대 시간 (배치 deadline 이 더 가까우면 그쪽 우선)
+    },
+    DIAGRAM_HEADERS: ['has_diagram', 'diagram_boxes'],   // I1, J1
+    DIAGRAM_TYPES: ['diagram', 'chart'],                 // line_data.type 중 그림으로 취급할 값
     PROP_START: 'MPR_RANGE_START',
     PROP_END:   'MPR_RANGE_END',
     PROP_STOP:  'MPR_STOP_FLAG',
@@ -20,6 +48,15 @@ const _MPR = (function () {
 
   function getSheet_() {
     return SpreadsheetApp.getActive().getSheetByName(CFG.SHEET_NAME);
+  }
+
+  /** I1/J1 헤더가 비어 있으면 채움 (기존 헤더는 건드리지 않음) */
+  function ensureDiagramHeader_(sh) {
+    const rng = sh.getRange(1, CFG.COLS.has_diagram, 1, 2);
+    const cur = rng.getValues()[0];
+    if (!String(cur[0] || '').trim() && !String(cur[1] || '').trim()) {
+      rng.setValues([CFG.DIAGRAM_HEADERS]);
+    }
   }
 
   function getMathpixCreds_() {
@@ -34,6 +71,27 @@ const _MPR = (function () {
     const m = (s || '').match(/[-\w]{25,}/);
     if (!m) throw new Error('fileId parse failed: ' + s);
     return m[0];
+  }
+
+  /** Drive 파일 → data URL */
+  function driveFileToDataUrl_(linkOrId) {
+    const fileId = extractFileId_(linkOrId);
+    const blob = DriveApp.getFileById(fileId).getBlob();
+    return 'data:' + blob.getContentType() + ';base64,' + Utilities.base64Encode(blob.getBytes());
+  }
+
+  /** Mathpix v3/text 요청 본문 (한 곳에서만 관리) */
+  function buildPayload_(dataUrl) {
+    return {
+      src: dataUrl,
+      formats: ['text'],
+      rm_spaces: true,
+      math_inline_delimiters: ['$', '$'],
+      math_block_delimiters: ['$$', '$$'],
+      enable_tables: true,
+      confidence_threshold: 0.0,
+      include_line_data: true          // ← 패치 1: 줄 단위 정보(그림 좌표 포함) 요청
+    };
   }
 
   function callMathpix_(creds, payload) {
@@ -54,6 +112,117 @@ const _MPR = (function () {
       throw new Error('Mathpix error ' + code + ': ' + res.getContentText());
     }
     throw new Error('Mathpix retry exhausted');
+  }
+
+  /** ===== 패치 1: line_data → 그림 바운딩 박스 =====
+   *  반환: { w, h, n, boxes:[{type, subtype, x, y, w, h}] }
+   */
+  function extractDiagrams_(result) {
+    const out = {
+      w: Number(result.image_width  || 0),
+      h: Number(result.image_height || 0),
+      n: 0,
+      boxes: []
+    };
+    const lines = Array.isArray(result.line_data) ? result.line_data : [];
+    for (const ln of lines) {
+      const type = String(ln.type || '');
+      if (CFG.DIAGRAM_TYPES.indexOf(type) < 0) continue;
+      const cnt = Array.isArray(ln.cnt) ? ln.cnt : [];
+      if (cnt.length < 2) continue;
+
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      for (const p of cnt) {
+        const x = Number(p[0]), y = Number(p[1]);
+        if (!isFinite(x) || !isFinite(y)) continue;
+        if (x < minX) minX = x; if (x > maxX) maxX = x;
+        if (y < minY) minY = y; if (y > maxY) maxY = y;
+      }
+      if (!isFinite(minX) || !isFinite(minY)) continue;
+
+      out.boxes.push({
+        type,
+        subtype: String(ln.subtype || ''),
+        x: Math.round(minX),
+        y: Math.round(minY),
+        w: Math.round(maxX - minX),
+        h: Math.round(maxY - minY)
+      });
+    }
+    out.n = out.boxes.length;
+    return out;
+  }
+
+  /** OCR 성공 결과를 행에 기록 (latex + diagram 정보). status 는 호출자가 정한다. 반환: dg */
+  function writeSuccess_(sh, row, result) {
+    const dg = extractDiagrams_(result);
+    sh.getRange(row, CFG.COLS.latex).setValue(result.text || '');
+    sh.getRange(row, CFG.COLS.last_error).setValue('');
+    sh.getRange(row, CFG.COLS.processed_at).setValue(new Date());
+    sh.getRange(row, CFG.COLS.has_diagram, 1, 2).setValues([[
+      dg.n > 0,
+      dg.n > 0 ? JSON.stringify(dg) : ''
+    ]]);
+    return dg;
+  }
+
+  function writeError_(sh, row, err) {
+    sh.getRange(row, CFG.COLS.status).setValue('error');
+    sh.getRange(row, CFG.COLS.last_error).setValue(String(err).slice(0, 500));
+    sh.getRange(row, CFG.COLS.processed_at).setValue(new Date());
+  }
+
+  function figAvailable_() {
+    return CFG.FIG.ENABLED && typeof _MPF !== 'undefined' && _MPF && typeof _MPF.processRowSync_ === 'function';
+  }
+
+  /** ===== 패치 4: 그림 단계. 최종 status 를 정해 기록하고 'done' | 'fig_pending' 반환 ===== */
+  function finishFigures_(sh, row, deadlineMs) {
+    const until = Math.min(deadlineMs, Date.now() + CFG.FIG.MAX_WAIT_MS);
+    let r;
+    try {
+      r = _MPF.processRowSync_(sh, row, until);      // 'done' | 'pending' | 'error' | 'no_pdf'
+    } catch (err) {
+      sh.getRange(row, _MPF.COLS.fig_status).setValue('error: ' + String(err).slice(0, 300));
+      r = 'error';
+    }
+    if (r === 'pending') {
+      sh.getRange(row, CFG.COLS.status).setValue('fig_pending');
+      return 'fig_pending';
+    }
+    // r === 'done' 이면 _MPF 가 (INTO_LATEX 설정에 따라) C열 교체까지 끝낸 상태
+    sh.getRange(row, CFG.COLS.status).setValue('done');
+    sh.getRange(row, CFG.COLS.processed_at).setValue(new Date());
+    return 'done';
+  }
+
+  /** 한 행 변환. 반환: 'done' | 'fig_pending' | false(링크 없음). 실패 시 throw
+   *  status 가 fig_pending 이면 OCR 은 건너뛰고 그림 수집만 이어서 한다.
+   */
+  function convertOneRow_(sh, row, creds, attempts, linkOrId, deadlineMs, status) {
+    const resume = status === 'fig_pending';
+    if (!resume) {
+      sh.getRange(row, CFG.COLS.attempts).setValue(attempts + 1);
+      sh.getRange(row, CFG.COLS.status).setValue('in_progress');
+
+      if (!linkOrId) {
+        sh.getRange(row, CFG.COLS.status).setValue('error');
+        sh.getRange(row, CFG.COLS.last_error).setValue('missing_drive_link');
+        sh.getRange(row, CFG.COLS.processed_at).setValue(new Date());
+        return false;
+      }
+
+      const result = callMathpix_(creds, buildPayload_(driveFileToDataUrl_(linkOrId)));
+      const dg = writeSuccess_(sh, row, result);
+      if (!(dg.n > 0 && figAvailable_())) {
+        sh.getRange(row, CFG.COLS.status).setValue('done');
+        return 'done';
+      }
+    } else if (!figAvailable_()) {
+      sh.getRange(row, CFG.COLS.status).setValue('done');   // 그림 기능이 꺼졌으면 그대로 마감
+      return 'done';
+    }
+    return finishFigures_(sh, row, deadlineMs || (Date.now() + CFG.FIG.MAX_WAIT_MS));
   }
 
   function deleteMyTriggers_() {
@@ -112,6 +281,7 @@ const _MPR = (function () {
 
       const sh = getSheet_();
       if (!sh) { deleteMyTriggers_(); return; }
+      ensureDiagramHeader_(sh);
 
       const deadline = Date.now() + CFG.TIME_BUDGET_MS - CFG.SAFETY_GAP_MS;
       const creds = getMathpixCreds_();
@@ -129,44 +299,15 @@ const _MPR = (function () {
         const linkOrId = String(data[i][CFG.COLS.drive_link - 1] || '').trim();
 
         if (status === 'done') continue;
-        if (attempts >= CFG.MAX_ATTEMPTS) continue; // 반복 실패 행은 포기(last_error 참고)
+        if (status !== 'fig_pending' && attempts >= CFG.MAX_ATTEMPTS) continue; // 반복 실패 행은 포기(last_error 참고)
 
         if (Date.now() > deadline) { remaining++; continue; } // 시간 소진 → 남은 것으로 집계만
 
         try {
-          sh.getRange(row, CFG.COLS.attempts).setValue(attempts + 1);
-          sh.getRange(row, CFG.COLS.status).setValue('in_progress');
-
-          if (!linkOrId) {
-            sh.getRange(row, CFG.COLS.status).setValue('error');
-            sh.getRange(row, CFG.COLS.last_error).setValue('missing_drive_link');
-            sh.getRange(row, CFG.COLS.processed_at).setValue(new Date());
-            continue;
-          }
-
-          const fileId = extractFileId_(linkOrId);
-          const blob = DriveApp.getFileById(fileId).getBlob();
-          const dataUrl = 'data:' + blob.getContentType() + ';base64,' + Utilities.base64Encode(blob.getBytes());
-
-          const result = callMathpix_(creds, {
-            src: dataUrl,
-            formats: ['text'],
-            rm_spaces: true,
-            math_inline_delimiters: ['$', '$'],
-            math_block_delimiters: ['$$', '$$'],
-            enable_tables: true,
-            confidence_threshold: 0.0
-          });
-
-          sh.getRange(row, CFG.COLS.latex).setValue(result.text || '');
-          sh.getRange(row, CFG.COLS.status).setValue('done');
-          sh.getRange(row, CFG.COLS.last_error).setValue('');
-          sh.getRange(row, CFG.COLS.processed_at).setValue(new Date());
-
+          const r = convertOneRow_(sh, row, creds, attempts, linkOrId, deadline, status);
+          if (r === 'fig_pending') remaining++;            // 그림 대기 → 다음 회차에 이어서
         } catch (err) {
-          sh.getRange(row, CFG.COLS.status).setValue('error');
-          sh.getRange(row, CFG.COLS.last_error).setValue(String(err).slice(0, 500));
-          sh.getRange(row, CFG.COLS.processed_at).setValue(new Date());
+          writeError_(sh, row, err);
           if (attempts + 1 < CFG.MAX_ATTEMPTS) remaining++; // 재시도 대상
         }
 
@@ -187,15 +328,18 @@ const _MPR = (function () {
       try { lock.releaseLock(); } catch (_) {}
     }
   }
-    /** ===== 파이프라인용: 지정 행들을 deadline 까지 변환 (UI·트리거 없음) =====
+
+  /** ===== 파이프라인용: 지정 행들을 deadline 까지 변환 (UI·트리거 없음) =====
    *  rows: 행 번호 배열 / deadlineMs: Date.now() 기준 절대시각
-   *  반환: { attempted, ok, err, stoppedByTime }
+   *  반환: { attempted, ok, err, stoppedByTime, withDiagram, figPending }
+   *  - fig_pending 행이 남으면 stoppedByTime=true 로 돌려 Pipeline 이 'yield' 하고 다음 회차에 다시 넘겨주게 한다.
    */
   function convertRows_(rows, deadlineMs) {
     const sh = getSheet_();
     if (!sh) throw new Error(`시트 "${CFG.SHEET_NAME}" 없음`);
+    ensureDiagramHeader_(sh);
     const creds = getMathpixCreds_();
-    const out = { attempted: 0, ok: 0, err: 0, stoppedByTime: false };
+    const out = { attempted: 0, ok: 0, err: 0, stoppedByTime: false, withDiagram: 0, figPending: 0 };
 
     for (const row of rows) {
       if (Date.now() > deadlineMs) { out.stoppedByTime = true; break; }
@@ -204,48 +348,63 @@ const _MPR = (function () {
       const vals = sh.getRange(row, 1, 1, 8).getValues()[0];
       const attempts = Number(vals[CFG.COLS.attempts - 1] || 0);
       const linkOrId = String(vals[CFG.COLS.drive_link - 1] || '').trim();
+      const status = String(vals[CFG.COLS.status - 1] || '').trim();
 
       try {
-        sh.getRange(row, CFG.COLS.attempts).setValue(attempts + 1);
-        sh.getRange(row, CFG.COLS.status).setValue('in_progress');
-
-        if (!linkOrId) {
-          sh.getRange(row, CFG.COLS.status).setValue('error');
-          sh.getRange(row, CFG.COLS.last_error).setValue('missing_drive_link');
-          sh.getRange(row, CFG.COLS.processed_at).setValue(new Date());
-          out.err++; continue;
+        const r = convertOneRow_(sh, row, creds, attempts, linkOrId, deadlineMs, status);
+        if (r === 'done') {
+          out.ok++;
+          if (sh.getRange(row, CFG.COLS.has_diagram).getValue() === true) out.withDiagram++;
+        } else if (r === 'fig_pending') {
+          out.figPending++;
+          out.stoppedByTime = true;      // 다음 회차에 이어서 수집
+        } else {
+          out.err++;
         }
-
-        const fileId = extractFileId_(linkOrId);
-        const blob = DriveApp.getFileById(fileId).getBlob();
-        const dataUrl = 'data:' + blob.getContentType() + ';base64,' + Utilities.base64Encode(blob.getBytes());
-
-        const result = callMathpix_(creds, {
-          src: dataUrl,
-          formats: ['text'],
-          rm_spaces: true,
-          math_inline_delimiters: ['$', '$'],
-          math_block_delimiters: ['$$', '$$'],
-          enable_tables: true,
-          confidence_threshold: 0.0
-        });
-
-        sh.getRange(row, CFG.COLS.latex).setValue(result.text || '');
-        sh.getRange(row, CFG.COLS.status).setValue('done');
-        sh.getRange(row, CFG.COLS.last_error).setValue('');
-        sh.getRange(row, CFG.COLS.processed_at).setValue(new Date());
-        out.ok++;
-
       } catch (err) {
-        sh.getRange(row, CFG.COLS.status).setValue('error');
-        sh.getRange(row, CFG.COLS.last_error).setValue(String(err).slice(0, 500));
-        sh.getRange(row, CFG.COLS.processed_at).setValue(new Date());
+        writeError_(sh, row, err);
         out.err++;
       }
       Utilities.sleep(200);
     }
     return out;
   }
+
+  /** ===== 디버그: 행 하나의 line_data 타입 요약 확인 (시트는 건드리지 않음) ===== */
+  function debugLineData_() {
+    const ui = SpreadsheetApp.getUi();
+    const sh = getSheet_();
+    if (!sh) { ui.alert(`시트 "${CFG.SHEET_NAME}" 없음`); return; }
+
+    const resp = ui.prompt('line_data 확인', '확인할 행 번호 (예: 5)', ui.ButtonSet.OK_CANCEL);
+    if (resp.getSelectedButton() !== ui.Button.OK) return;
+    const row = Number((resp.getResponseText() || '').trim());
+    if (!row || row < 2) { ui.alert('행 번호 오류'); return; }
+
+    const linkOrId = String(sh.getRange(row, CFG.COLS.drive_link).getValue() || '').trim();
+    if (!linkOrId) { ui.alert(`${row}행 drive_link 없음`); return; }
+
+    const result = callMathpix_(getMathpixCreds_(), buildPayload_(driveFileToDataUrl_(linkOrId)));
+    const lines = Array.isArray(result.line_data) ? result.line_data : [];
+
+    // 타입별 개수
+    const counts = {};
+    lines.forEach(ln => { const t = String(ln.type || '?'); counts[t] = (counts[t] || 0) + 1; });
+
+    const dg = extractDiagrams_(result);
+    const summary = [
+      `${row}행: ${String(sh.getRange(row, CFG.COLS.filename).getValue() || '')}`,
+      `이미지 크기: ${dg.w} x ${dg.h}`,
+      `line_data ${lines.length}줄 — ` + Object.keys(counts).map(k => `${k}:${counts[k]}`).join(', '),
+      `그림(${CFG.DIAGRAM_TYPES.join('/')}) ${dg.n}개`,
+      ...dg.boxes.map((b, i) => `  [${i+1}] ${b.type}${b.subtype ? '/'+b.subtype : ''}  x=${b.x} y=${b.y} w=${b.w} h=${b.h}`)
+    ].join('\n');
+
+    Logger.log(summary);
+    Logger.log(JSON.stringify(lines.map(ln => ({ type: ln.type, subtype: ln.subtype, cnt: ln.cnt, text: (ln.text || '').slice(0, 40) })), null, 1));
+    ui.alert('line_data 요약', summary + '\n\n(전체 line_data 는 실행 로그에서 확인)', ui.ButtonSet.OK);
+  }
+
   /** ===== 중지 ===== */
   function stop_() {
     const sp = PropertiesService.getScriptProperties();
@@ -256,7 +415,7 @@ const _MPR = (function () {
     try { SpreadsheetApp.getUi().alert('자동변환을 중지했습니다.'); } catch (_) {}
   }
 
-  return { start_, stop_, processBatch_, convertRows_ };
+  return { start_, stop_, processBatch_, convertRows_, debugLineData_ };
 })();
 
 /** ===== 전역 래퍼 (메뉴/트리거용) ===== */
@@ -264,3 +423,4 @@ function mpr_runRangeAuto() { _MPR.start_(); }
 function mpr_stopAuto()     { _MPR.stop_(); }
 function mpr__continueRange() { _MPR.processBatch_(); } // 트리거가 호출
 function mpr_convertRows(rows, deadlineMs) { return _MPR.convertRows_(rows, deadlineMs); } // 파이프라인용
+function mpr_debugLineData() { _MPR.debugLineData_(); } // 패치 1 확인용 (메뉴에 추가하거나 편집기에서 직접 실행)
