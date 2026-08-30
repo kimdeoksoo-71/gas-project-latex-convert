@@ -1,114 +1,272 @@
 /*************************************************
- * Data_DS: 원본 문제(B열) → stem(E) + choices(F~J) + answer_type(K)
+ * normalizeProblem.gs — Data_DS 문항 정규화 (2026-08-30 보완판)
  *
- * - mcq 판정: (1)~(5) 5개가 "각각 별도 행"으로 존재하면 mcq
- *    - 선지 번호는 괄호문자 (1)~(5) 와 원문자 ①~⑤ 를 모두 인정(한 문항 내 혼용 허용)
- *    - Mathpix OCR이 (1)/① 를 섞어 내보내도 정상 판별
- * - answer_type(K) 최종 3분류:
- *    - mcq_combo : choices에 ㄱ/ㄴ/ㄷ 또는 ᄀ/ᄂ/ᄃ 포함(합답형)
- *    - mcq_math  : mcq이면서 합답형이 아닌 경우(정답형/완성형)
- *    - short_int : mcq가 아닌 경우(단답형으로 취급)
+ * 입력  A key(파일명 공통부, 예: 2606평가원_1공통07) / B 원본 문제(Latex) / C 해설
+ * 출력  E stem / F~J 선지("① …" 형식) / K answer_type
+ *       K = mcq_math | mcq_combo | short_int | NEED_REVIEW:… | RAW_EMPTY | EXCEPTION: …
  *
- * - 선택지 정규화:
- *    - 번호(마커)는 항상 원문자 ①~⑤ 로 통일하여 각 선지 앞에 부착
- *    - mcq_math: 수식은 $...$로 감싼다(이미 $...$ / $$...$$면 유지) → 예: "① $2x+1$"
- *    - mcq_combo: ᄀᄂᄃ를 ㄱㄴㄷ로 통일하고 "ㄱ, ㄴ" 형식으로 정리 → 예: "① ㄱ, ㄴ"
+ * 판정 순서
+ *  1) 문항번호로 객관식/주관식 선판정  (ds_expectedType_)
+ *     - A열 key 의 번호와 B열 첫머리 인쇄 번호를 비교, 다르면 인쇄 번호 우선 + NUM_MISMATCH 경고
+ *     - 공통 1~15 / 선택 23~28 → 객관식,  16~22 / 29~30 → 단답형  (DSN.QTYPE_RULES)
+ *     - key 가 규칙에 안 맞으면 선판정 없이 현행 방식(파싱 결과만)으로 판정
+ *  2) 객관식이면 선지 토크나이저(parseMcqFromRaw_)로 5개 선지 추출
+ *     - 마커 (1)~(5), （1）~（5）, ①~⑤, \textcircled{n} 을 모두 인정, 한 문항 안 혼용 허용
+ *     - 줄 단위가 아니라 텍스트 전체에서 마커를 찾고, {1..5} 를 정확히 한 번씩 담는 연속 5개 창을 선지 블록으로 채택
+ *       (순서 뒤바뀜 (1)(4)(2)(5)(3) 허용, 발문 속 (1)(2) 참조·선지 뒤 메모/그림 라벨/다음 문항 유출은 자동 배제)
+ *     - 선지 뒤에 남는 텍스트(메모, \end{itemize}, 그림 라벨 …)는 E/F~J 에서 제외(B 에는 남음) + TRAILER_DROPPED 경고
+ *  3) 객관식인데 선지를 못 찾으면 K = NEED_REVIEW:MCQ_<사유>, E 에는 원문 보존 (조용한 short_int 금지)
+ *     단답형 번호면 선지 파싱을 생략하고 short_int (DSN.SKIP_PARSE_FOR_SHORT)
+ *  4) mcq_math / mcq_combo 구별은 기존 기준(선지에 ㄱ/ㄴ/ㄷ 포함 여부) 그대로
+ *
+ * 부수 효과(제자리 덮어쓰기)
+ *  - B열: mcq 확정 행의 선지 마커 5곳만 ①~⑤ 로 통일 (DSN.REWRITE_RAW_MARKERS)
+ *  - C열: 첫머리 "정답 (n)" → "정답 ⓝ" (기존 normalizeSolutionAnswerMarker_)
+ *
+ * 진입점
+ *  - 메뉴 '⏺️ 문항 정규화'      : ds_runNormalizeAndValidate_byRowInput  (행 범위 입력)
+ *  - 메뉴 '🔎 정규화 점검(쓰기 없음)' : ds_auditNormalize_byRowInput  (재정규화 대상만 골라 보고)
+ *  - 파이프라인 normalize 단계 : Pipeline.gs 의 pl_normalizeRows_ → ds_normalizeRow_
+ *  공통 코어 ds_normalizeRow_(sh,row) 하나만 시트를 읽고 쓴다. 판정 자체는 순수 함수 ds_classify_ (Node 테스트 가능).
+ *
+ * (ㄱ)(ㄴ)(ㄷ)→(1)(2)(3) 참조 변환은 "(n)=원문자" 전제와 충돌하므로 GAS 에서는 하지 않는다 (2026-08-30 결정).
  *************************************************/
 
 const DSN = {
   SHEET: 'Data_DS',
+  COL: { key: 1, raw: 2, solution: 3 },                 // A, B, C
+  OUT: { stem: 5, c1: 6, c2: 7, c3: 8, c4: 9, c5: 10, type: 11 }, // E, F~J, K
+  OVERWRITE_NORMALIZE: true,
 
-  // 입력
-  COL: {
-    raw: 2,      // B 원본 문제
-    solution: 3  // C 해설
-  },
-
-  // 출력 (K까지만 사용)
-  OUT: {
-    stem: 5,      // E
-    c1: 6, c2: 7, c3: 8, c4: 9, c5: 10, // F~J
-    type: 11      // K  mcq_math | mcq_combo | short_int | (fail reason)
-  },
-
-  OVERWRITE_NORMALIZE: true
+  SKIP_PARSE_FOR_SHORT: true,      // 번호가 단답형이면 선지 파싱 생략
+  MCQ_FAIL_POLICY: 'review',       // 'review' → K=NEED_REVIEW:MCQ_… | 'short' → 예전처럼 short_int
+  REWRITE_RAW_MARKERS: 'chain',    // 'chain' 선지 마커 5곳만 ①~⑤ 로 치환 | 'none' B열 보존
+  UNWRAP_ITEMIZE: true             // stem 의 \begin{itemize}\item[7.] … \end{itemize} (그림 추출 mmd) 를 "7. …" 로
 };
 
-/*************************************************
- * 선지 번호(원문자) 관련 상수/헬퍼
- *  - Mathpix OCR이 (1)~(5)를 원문자 ①~⑤로 바꾸거나 그대로 두거나,
- *    한 문항 안에서 뒤섞어 내보내는 문제를 흡수한다.
- *  - 선지 판별/저장 시 번호는 항상 원문자 ①~⑤로 통일한다.
- *************************************************/
 const CIRCLED_NUMS = ['①', '②', '③', '④', '⑤'];      // idx 0~4 → 선지 1~5
 const CIRCLED_TO_INT = { '①': 1, '②': 2, '③': 3, '④': 4, '⑤': 5 };
 
+/* =================================================
+ * 1. 순수 판정 함수 (시트 접근 없음)
+ * ================================================= */
+// 문항번호 → 유형 (현행 2022학년도~ 수능 체제, 과목 무관: 공통 1~15 객관식 / 16~22 단답형, 선택 23~28 객관식 / 29~30 단답형)
+DSN.QTYPE_RULES = [
+  { from: 1,  to: 15, type: 'mcq'   },
+  { from: 16, to: 22, type: 'short' },
+  { from: 23, to: 28, type: 'mcq'   },
+  { from: 29, to: 30, type: 'short' }
+];
+// A열 key 에서 과목코드+번호: "…_1공통07" / "…_4미적28"  (CroP 명명 규칙. 이 코드가 있어야 신체제 시험지로 간주)
+const KEY_RE = /[1345](공통|확통|미적|기하)(\d{2})\s*$/;
+// 본문 첫머리 인쇄 문항번호: "12." / "12)" / "\begin{itemize}\item[12.]"
+const PRINTED_NUM_RE = /^\s*(?:\\begin\{itemize\}\s*\\item\[\s*(\d{1,2})\s*\.?\s*\]|(\d{1,2})\s*[.)])/;
+
+function qtypeFromNum_(num) {
+  const r = DSN.QTYPE_RULES.find(r => num >= r.from && num <= r.to);
+  return r ? r.type : null;
+}
+
 /**
- * 정규화된 선지 내용 앞에 원문자 마커(①~⑤)를 붙인다.
- * @param {string} content 번호가 제거된 선지 내용(이미 $…$/합답형 정규화 완료)
- * @param {number} idx     0-based 선지 인덱스(0→①, 4→⑤)
+ * 문항번호 기반 선판정.  A열 key 의 번호와 B열 본문 첫머리의 인쇄 번호를 모두 본다.
+ *  - 둘이 다르면 인쇄 번호를 우선한다(파일명 번호가 한 칸씩 밀린 세트가 실제로 있음) 하고 NUM_MISMATCH 경고.
+ *  - key 가 규칙(과목코드+2자리)에 안 맞으면 expected:null → 현행 동작(파싱 결과만으로 판정)으로 폴백.
+ * @returns {{subject, keyNum, printedNum, num, expected:'mcq'|'short'|null, warn:string[]}}
  */
+function ds_expectedType_(key, raw) {
+  const warn = [];
+  const m = String(key ?? '').match(KEY_RE);
+  if (!m) return { subject: null, keyNum: null, printedNum: null, num: null, expected: null, warn: ['KEY_NO_MATCH'] };
+  const subject = m[1], keyNum = Number(m[2]);
+  const pm = String(raw ?? '').match(PRINTED_NUM_RE);
+  const printedNum = pm ? Number(pm[1] || pm[2]) : null;
+  let num = keyNum;
+  if (printedNum != null && printedNum !== keyNum && qtypeFromNum_(printedNum)) {
+    num = printedNum; warn.push('NUM_MISMATCH(key ' + keyNum + ' / printed ' + printedNum + ')');
+  }
+  const expected = qtypeFromNum_(num);
+  if (!expected) warn.push('NUM_OUT_OF_RANGE');
+  return { subject, keyNum, printedNum, num, expected, warn };
+}
+
+/* ---- 선지 토크나이저 ---- */
+// 마커: (행시작|공백|$) 뒤의  (n) / （n） / ①~⑤ / \textcircled{n} ; 뒤에 글자·숫자가 붙으면 제외 (f(1), (1)번)
+const MARK_RE = /(^|[\s$])(?:[\(（]\s*([1-5])\s*[\)）]|([①②③④⑤])|\\textcircled\s*\{\s*([1-5])\s*\})\$?(?![\d\w가-힣])/gm;
+
+function findChoiceMarkers_(text) {
+  const out = []; let m; MARK_RE.lastIndex = 0;
+  while ((m = MARK_RE.exec(text)) !== null) {
+    const k = m[2] != null ? Number(m[2]) : m[3] != null ? CIRCLED_TO_INT[m[3]] : Number(m[4]);
+    out.push({ k, start: m.index + m[1].length, end: m.index + m[0].length });
+  }
+  return out;
+}
+
+/**
+ * 선지 내용 추출: 마커 뒤 같은 줄 텍스트. 같은 줄이 비어 있으면(마커 단독 줄) 다음 비어있지 않은 줄 하나.
+ * 수식 블록(\[ … \] / $$ … $$)이 열려 있으면 닫힐 때까지 이어 붙인다. limit 이후는 보지 않는다.
+ */
+function sliceChoice_(src, from, limit) {
+  const region = src.slice(from, limit);
+  const lines = region.split('\n');
+  let out = [], i = 0;
+  // 같은 줄
+  let first = lines[0].trim();
+  if (first) { out.push(first); i = 1; }
+  else { i = 1; while (i < lines.length && !lines[i].trim()) i++; if (i < lines.length) { out.push(lines[i].trim()); i++; } }
+  // 열린 수식 블록 이어붙이기
+  const joined = () => out.join('\n');
+  const open = s => (s.match(/\\\[/g) || []).length > (s.match(/\\\]/g) || []).length || ((s.match(/\$\$/g) || []).length % 2 === 1);
+  while (open(joined()) && i < lines.length) { out.push(lines[i].trim()); i++; }
+  const usedLines = i;
+  const rest = lines.slice(usedLines).filter(l => l.trim());
+  return { content: joined().replace(/\\quad|\\qquad/g, ' ').trim(), leftover: rest };
+}
+
+function parseMcqFromRaw_(text) {
+  const src = String(text ?? '').replace(/\r\n?/g, '\n');
+  const marks = findChoiceMarkers_(src);
+  const present = new Set(marks.map(m => m.k));
+  const missing = [1, 2, 3, 4, 5].filter(k => !present.has(k));
+  if (missing.length) return { ok: false, reason: 'CHOICE_MISSING_' + missing.join(''), found: marks.map(x => x.k).join('') };
+
+  // 각 마커의 내용(다음 마커 직전까지)을 미리 계산
+  const items = marks.map((m, i) => {
+    const limit = i + 1 < marks.length ? marks[i + 1].start : src.length;
+    return Object.assign({}, m, sliceChoice_(src, m.end, limit));
+  });
+  // 후보 창: 문서 순으로 연속한 5개 마커가 {1..5} 를 정확히 한 번씩 담는 구간.
+  //  - 순서는 강제하지 않는다 (Mathpix 가 2단 배치를 (1)(4)(2)(5)(3) 순으로 읽는 경우가 실제로 있음)
+  //  - 발문 속 (1),(2) 참조·선지 뒤의 표/그림 숫자 (1)(2)… 는 완전한 창을 만들지 못하거나 내용이 비어 점수가 낮다.
+  //  - 점수 = 내용이 비어있지 않은 선지 수. 동점이면 뒤쪽 창.
+  let best = null;
+  for (let i = 0; i + 5 <= items.length; i++) {
+    const w = items.slice(i, i + 5);
+    if (new Set(w.map(x => x.k)).size !== 5) continue;
+    const score = w.filter(x => x.content).length;
+    if (!best || score >= best.score) best = { w, score };
+  }
+  let strayInBlock = false;
+  if (!best) {
+    // 완전한 창이 없으면(마커가 중간에 끼어듦) 각 번호의 마지막 출현으로 폴백
+    const lastOf = {}; items.forEach(x => { lastOf[x.k] = x; });
+    best = { w: [1, 2, 3, 4, 5].map(k => lastOf[k]).sort((a, b) => a.start - b.start), score: 0 };
+    strayInBlock = true;
+  }
+  const byPos = best.w;                                          // 문서 순
+  const chain = byPos.slice().sort((a, b) => a.k - b.k);         // k 순 (기록·치환용)
+  const blockStart = byPos[0].start;
+
+  const stem = src.slice(0, blockStart).trim();
+  const choices = ['', '', '', '', ''], warn = [];
+  if (strayInBlock) warn.push('STRAY_MARKER_IN_BLOCK');
+  if (byPos.some((c, i) => c.k !== i + 1)) warn.push('CHOICE_ORDER_' + byPos.map(c => c.k).join(''));
+  let trailer = '';
+  byPos.forEach((c, i) => {
+    // 창 안 마지막 선지의 내용은 다음 마커가 아니라 문서 끝까지 기준으로 다시 잘라 trailer 를 얻는다
+    const r = (i < 4) ? c : sliceChoice_(src, c.end, src.length);
+    choices[c.k - 1] = r.content;
+    if (r.leftover.length) {
+      if (i < 4) warn.push(`CHOICE_${c.k}_EXTRA_LINES`);
+      else trailer = r.leftover.join('\n');
+    }
+  });
+  const empty = choices.map((c, i) => c ? null : i + 1).filter(Boolean);
+  if (empty.length) return { ok: false, reason: 'CHOICE_EMPTY_' + empty.join(''), choices, chain };
+  if (trailer) warn.push('TRAILER_DROPPED');
+  return { ok: true, stem, choices, chain, trailer, warn };
+}
+
+/** B열 원문: chain 위치의 마커 5곳만 ①~⑤ 로 치환 (뒤에서부터 치환해 오프셋 보존) */
+function rewriteRawMarkers_(src, chain) {
+  let s = String(src ?? '').replace(/\r\n?/g, '\n');
+  const desc = chain.slice().sort((a, b) => b.start - a.start);   // 뒤쪽부터 치환해야 앞쪽 오프셋이 유지됨
+  for (const c of desc) {
+    s = s.slice(0, c.start) + CIRCLED_NUMS[c.k - 1] + ' ' + s.slice(c.end).replace(/^[ \t]+/, '');
+  }
+  return s;
+}
+
+/* ---- 기존 유지 함수 ---- */
+function detectAnswerTypeFromChoices_(choices) {
+  return /[ㄱㄴㄷᄀᄂᄃ]/.test((choices || []).join(' ')) ? 'mcq_combo' : 'mcq_math';
+}
+function normalizeChoiceToLatex_(s) {
+  const t = String(s ?? '').trim();
+  if (!t) return '';
+  if ((t.startsWith('$$') && t.endsWith('$$')) || (t.startsWith('$') && t.endsWith('$'))) return t;
+  if (t.startsWith('\\[') || t.startsWith('\\includegraphics') || t.startsWith('![')) return t;  // 수식블록·그림은 감싸지 않음
+  if (/[ㄱㄴㄷᄀᄂᄃ]/.test(t)) return t;
+  return '$' + t + '$';
+}
+function normalizeComboChoice_(s) {
+  const t0 = String(s ?? '').trim().replace(/ᄀ/g, 'ㄱ').replace(/ᄂ/g, 'ㄴ').replace(/ᄃ/g, 'ㄷ');
+  const arr = []; if (t0.includes('ㄱ')) arr.push('ㄱ'); if (t0.includes('ㄴ')) arr.push('ㄴ'); if (t0.includes('ㄷ')) arr.push('ㄷ');
+  return arr.join(', ');
+}
 function attachCircledMarker_(content, idx) {
-  const marker = CIRCLED_NUMS[idx] || '';
-  const c = String(content ?? '').trim();
+  const marker = CIRCLED_NUMS[idx] || ''; const c = String(content ?? '').trim();
   return c ? (marker + ' ' + c) : marker;
 }
 
-/**
- * B열(원본 문제) 텍스트의 "행 시작 선지 번호"를 원문자로 통일한다.
- *  - (1)~(5), 전각 （1）~（5） → ①~⑤
- *  - 발문 중간에 우연히 들어간 (1) 같은 표현은 건드리지 않도록,
- *    반드시 "행 시작(앞쪽 공백 허용)" 위치의 마커만 변환한다.
- *  - 이미 원문자면 그대로 유지(멱등).
- * @param {string} text 원본 문제 텍스트
- * @returns {string} 선지 번호가 원문자로 통일된 텍스트
- */
-function normalizeChoiceMarkersInText_(text) {
-  const lines = String(text ?? '').replace(/\r\n?/g, '\n').split('\n');
-  const out = lines.map(line =>
-    line.replace(/^(\s*)[\(（]([1-5])[\)）]/, (whole, sp, d) => sp + CIRCLED_NUMS[Number(d) - 1])
-  );
-  return out.join('\n');
+/** 그림 추출(v3/pdf mmd)이 문항을 \begin{itemize}\item[7.] … \end{itemize} 로 감싸는 경우 풀어준다 */
+function unwrapItemize_(s) {
+  return String(s ?? '')
+    .replace(/^\s*\\begin\{itemize\}\s*\\item\[\s*([^\]]*?)\s*\]\s*/, '$1 ')
+    .replace(/\s*\\end\{itemize\}\s*$/, '')
+    .trim();
 }
 
+/** 순수 판정 코어: 시트 접근 없음. 반환값을 호출측이 기록한다. */
+function ds_classify_(key, raw, cfg) {
+  cfg = cfg || DSN;
+  const exp = ds_expectedType_(key, raw);
+  const warn = exp.warn.slice();
+  const R = { expected: exp.expected, num: exp.num, warn, rawOut: raw };
+  if (!String(raw ?? '').trim()) return Object.assign(R, { ok: false, type: 'RAW_EMPTY', stem: '', choices: ['', '', '', '', ''] });
+
+  const skip = exp.expected === 'short' && cfg.SKIP_PARSE_FOR_SHORT !== false;
+  const mcq = skip ? { ok: false, reason: 'SKIPPED_SHORT' } : parseMcqFromRaw_(raw);
+
+  if (mcq.ok && exp.expected !== 'short') {
+    const type = detectAnswerTypeFromChoices_(mcq.choices);
+    const choices = mcq.choices.map((x, i) => attachCircledMarker_(type === 'mcq_math' ? normalizeChoiceToLatex_(x) : normalizeComboChoice_(x), i));
+    warn.push(...(mcq.warn || []));
+    const rawOut = (cfg.REWRITE_RAW_MARKERS === 'none') ? raw : rewriteRawMarkers_(raw, mcq.chain);
+    const stem = cfg.UNWRAP_ITEMIZE === false ? mcq.stem : unwrapItemize_(mcq.stem);
+    return Object.assign(R, { ok: true, type, stem, choices, rawOut, trailer: mcq.trailer });
+  }
+  if (mcq.ok && exp.expected === 'short') { warn.push('SHORT_BUT_CHOICES_FOUND'); }
+  if (exp.expected === 'mcq') {
+    if ((cfg.MCQ_FAIL_POLICY || 'review') === 'review')
+      return Object.assign(R, { ok: false, type: 'NEED_REVIEW:MCQ_' + mcq.reason, stem: raw, choices: ['', '', '', '', ''] });
+  }
+  const stemS = cfg.UNWRAP_ITEMIZE === false ? raw : unwrapItemize_(raw);
+  return Object.assign(R, { ok: true, type: 'short_int', stem: stemS, choices: ['', '', '', '', ''] });
+}
+
+/* =================================================
+ * 2. 기존 유지: 해설 정답마커, 행 입력 파서, 기록
+ * ================================================= */
+
 /**
- * C열(해설) 첫머리의 "정답 (n)"을 원문자로 통일한다.
- *  - 조건: 첫머리가 문항번호(숫자 + . 또는 ))로 시작하고, 그 문항번호와
- *    "정답" 사이에 '공백/줄바꿈/빈 행'만 있는 경우(=곧바로 정답이 오는 경우)에만 변환.
- *  - 문항번호와 정답 사이의 공백류는 개수·종류·순서에 규칙이 없어도 된다.
- *    (공백만 / 행바뀜 / 빈 행 1개 이상 / 이들의 임의 조합 모두 허용)
- *  - 예) "15. 정답 (3)"        → "15. 정답 ③"
- *       "15)\n정답 (1)"        → "15)\n정답 ①"
- *       "15.\n\n   정답 (2)"   → "15.\n\n   정답 ②"
- *  - 주의: 문항번호 뒤에 정답이 곧바로 오지 않으면(사이에 다른 '문자'가 있거나
- *    해설 본문뿐이면) 변환하지 않는다. 본문 중간의 "정답은 (2)"도 대상 아님.
- * @param {string} text 해설 텍스트
- * @returns {string} 정답 선지번호가 원문자로 통일된 텍스트(해당 없으면 원본 그대로)
+ * C열(해설) 첫머리의 "정답 (n)"을 원문자로 통일한다. (기존 로직 그대로)
+ *  - 첫머리가 문항번호(숫자 + . 또는 ))로 시작하고, 그 뒤 공백류만 지나 곧바로 "정답 (n)" 이 오는 경우만.
  */
 function normalizeSolutionAnswerMarker_(text) {
   const src = String(text ?? '').replace(/\r\n?/g, '\n');
-
-  // 첫머리(선행 공백/빈행 허용) 문항번호 토큰: "15." / "15)" / "15 )"
   const qHead = src.match(/^(\s*\d+\s*[.)])/);
-  if (!qHead) return text; // 문항번호 없음 → 변환 안 함
-
+  if (!qHead) return text;
   const headLen = qHead[1].length;
-  const before = src.slice(0, headLen);   // 문항번호 토큰(그대로 보존)
-  const after = src.slice(headLen);       // 그 뒤 전체
-
-  // 문항번호 뒤 ~ 정답 사이에는 공백류만 허용(\s 는 개행 포함 → 공백·행바뀜·빈행의 임의 조합 흡수).
-  // 정답이 아닌 다른 문자가 끼면 매치되지 않아 변환하지 않는다.
+  const before = src.slice(0, headLen);
+  const after = src.slice(headLen);
   const ANS_RE = /^(\s*정답\s*[:：]?\s*)[\(（]([1-5])[\)）]/;
   const m = after.match(ANS_RE);
   if (!m) return text;
-
-  const convertedHead = m[1] + CIRCLED_NUMS[Number(m[2]) - 1];
-  return before + convertedHead + after.slice(m[0].length);
+  return before + m[1] + CIRCLED_NUMS[Number(m[2]) - 1] + after.slice(m[0].length);
 }
 
-/*************************************************
- * 행 입력 파서: "15, 17, 123, 10-15"
- *************************************************/
+/** 행 입력 파서: "15, 17, 123, 10-15" */
 function parseRowInput_(text) {
   const set = new Set();
   String(text ?? '').split(',').forEach(part => {
@@ -116,229 +274,155 @@ function parseRowInput_(text) {
     if (!s) return;
     if (s.includes('-')) {
       const [a, b] = s.split('-').map(v => Number(String(v).trim()));
-      if (Number.isInteger(a) && Number.isInteger(b)) {
-        for (let i = Math.min(a, b); i <= Math.max(a, b); i++) set.add(i);
-      }
+      if (Number.isInteger(a) && Number.isInteger(b)) for (let i = Math.min(a, b); i <= Math.max(a, b); i++) set.add(i);
     } else {
       const n = Number(s);
       if (Number.isInteger(n)) set.add(n);
     }
   });
-  return Array.from(set).sort((x, y) => x - y);
+  return Array.from(set).filter(n => n >= 2).sort((x, y) => x - y);
 }
 
-/*************************************************
- * 시트 기록
- *************************************************/
+/** E~K 기록. r.ok=false 면 K 에 사유, E 는 r.stem(원문 보존용) 또는 빈칸, F~J 비움 */
 function writeNormResult_(sh, row, r) {
-  if (!r.ok) {
-    // 실패면 K에 reason만 남기고 E~J는 비움
-    sh.getRange(row, DSN.OUT.stem, 1, 6).setValues([[ '', '', '', '', '', '' ]]); // E~J
-    sh.getRange(row, DSN.OUT.type).setValue(String(r.reason || 'FAIL'));
-    return;
-  }
-
-  const stem = String(r.stem ?? '').trim();
-  const choices = Array.isArray(r.choices) ? r.choices : ['', '', '', '', ''];
-
+  const stem = r.ok ? String(r.stem ?? '').trim() : String(r.stem ?? '');
+  const choices = (r.ok && Array.isArray(r.choices)) ? r.choices : ['', '', '', '', ''];
   sh.getRange(row, DSN.OUT.stem, 1, 6).setValues([[
-    stem,
-    String(choices[0] ?? ''),
-    String(choices[1] ?? ''),
-    String(choices[2] ?? ''),
-    String(choices[3] ?? ''),
-    String(choices[4] ?? '')
+    stem, String(choices[0] ?? ''), String(choices[1] ?? ''), String(choices[2] ?? ''), String(choices[3] ?? ''), String(choices[4] ?? '')
   ]]);
-
-  sh.getRange(row, DSN.OUT.type).setValue(String(r.type || ''));
+  sh.getRange(row, DSN.OUT.type).setValue(String(r.ok ? (r.type || '') : (r.type || r.reason || 'FAIL')));
 }
 
-/*************************************************
- * 파서: (1)~(5) 5개 선택지가 "각각 별도 행"으로 있어야 mcq로 인정
- *************************************************/
-function parseMcqFromRaw_(text) {
-  const lines = String(text ?? '').replace(/\r\n?/g, '\n').split('\n');
-
-  const stemLines = [];
-  const choiceMap = {};
-  // 앞쪽 공백 허용: 행 시작부터 공백 가능
-  // 선지 마커는 다음을 모두 인정한다(한 문항 내 혼용 허용):
-  //   - 괄호문자: (1)~(5)  (전각 괄호 （1） 포함)
-  //   - 원문자  : ①~⑤
-  const re = /^\s*(?:[\(（](\d)[\)）]|([①②③④⑤]))\s*(.+)$/;
-
-  let inChoices = false;
-
-  for (const line of lines) {
-    const s = line.trim();
-    if (!s) continue;
-
-    const m = s.match(re);
-    if (m) {
-      inChoices = true;
-      // 괄호문자면 m[1], 원문자면 m[2] → 항상 정수 k(1~5)로 통일
-      const k = (m[1] != null) ? Number(m[1]) : CIRCLED_TO_INT[m[2]];
-      const content = m[3].trim();
-      if (k >= 1 && k <= 5) choiceMap[k] = content;
-      continue;
-    }
-
-    // 선택지 구간에 들어간 후 (n) 패턴이 아닌 라인 처리
-    if (inChoices) {
-      // 숫자만 있거나 의미없는 텍스트는 무시 (정답 번호나 메타데이터)
-      // 한글/영문이 섞인 실제 내용이 있으면 포맷 오류로 간주
-      if (/^[\d\s]+$/.test(s) || s.length <= 3) {
-        // 무시하고 계속 진행
-        continue;
-      }
-      // 그 외는 포맷 오류
-      return { ok: false, reason: 'CHOICE_BLOCK_FORMAT_BREAK' };
-    }
-
-    stemLines.push(line);
-  }
-
-  // 5개 선택지 모두 존재 확인
-  for (let k = 1; k <= 5; k++) {
-    if (!choiceMap[k]) return { ok: false, reason: 'CHOICE_MISSING_' + k };
-  }
-
-  return {
-    ok: true,
-    stem: stemLines.join('\n').trim(),
-    choices: [1, 2, 3, 4, 5].map(k => choiceMap[k])
-  };
-}
-
-/*************************************************
- * answer_type 판정: ㄱ/ㄴ/ㄷ 또는 ᄀ/ᄂ/ᄃ 포함되면 mcq_combo, 아니면 mcq_math
- *************************************************/
-function detectAnswerTypeFromChoices_(choices) {
-  const joined = (choices || []).join(' ');
-  return /[ㄱㄴㄷᄀᄂᄃ]/.test(joined) ? 'mcq_combo' : 'mcq_math';
-}
-
-/*************************************************
- * 수식 선택지 정규화: $...$ 강제(이미 $...$ 또는 $$...$$면 유지)
- *************************************************/
-function normalizeChoiceToLatex_(s) {
-  const t = String(s ?? '').trim();
-  if (!t) return '';
-  // 이미 $...$ 또는 $$...$$면 그대로
-  if ((t.startsWith('$$') && t.endsWith('$$')) || (t.startsWith('$') && t.endsWith('$'))) return t;
-  // 합답형 문자가 섞이면 감싸지 않음(안전장치)
-  if (/[ㄱㄴㄷᄀᄂᄃ]/.test(t)) return t;
-  // 그 외는 $...$
-  return '$' + t + '$';
-}
-
-/*************************************************
- * 합답형 선택지 정규화: ᄀᄂᄃ(호환 자모) → ㄱㄴㄷ로 통일 + "ㄱ, ㄴ" 형식
- *************************************************/
-function normalizeComboChoice_(s) {
-  const t0 = String(s ?? '').trim()
-    .replace(/ᄀ/g, 'ㄱ')
-    .replace(/ᄂ/g, 'ㄴ')
-    .replace(/ᄃ/g, 'ㄷ');
-
-  const hasG = t0.includes('ㄱ');
-  const hasN = t0.includes('ㄴ');
-  const hasD = t0.includes('ㄷ');
-
-  const arr = [];
-  if (hasG) arr.push('ㄱ');
-  if (hasN) arr.push('ㄴ');
-  if (hasD) arr.push('ㄷ');
-
-  return arr.join(', ');
-}
-
+/* =================================================
+ * 3. 공통 코어: 한 행 읽기 → 판정 → 쓰기   (메뉴·파이프라인 공용)
+ * ================================================= */
 /**
- * 메인메뉴에서 호출: 행번호 입력(예: 15, 17, 123, 10-15)
+ * @param {Sheet} sh Data_DS
+ * @param {number} row
+ * @param {{dryRun?:boolean}} [opts] dryRun=true 면 시트에 쓰지 않고 판정 결과만 반환
+ * @returns {{ok:boolean, type:string, expected:string|null, warn:string[], changedRaw:boolean}}
  */
+function ds_normalizeRow_(sh, row, opts) {
+  opts = opts || {};
+  const write = !opts.dryRun;
+
+  // C열 해설: 정답 마커 정규화 (문제 정규화와 독립, 실패 무시)
+  if (write) {
+    try {
+      const solCell = sh.getRange(row, DSN.COL.solution);
+      const solRaw = String(solCell.getDisplayValue() || '');
+      if (solRaw) { const solNorm = normalizeSolutionAnswerMarker_(solRaw); if (solNorm !== solRaw) solCell.setValue(solNorm); }
+    } catch (_) {}
+  }
+
+  const key = String(sh.getRange(row, DSN.COL.key).getDisplayValue() || '').trim();
+  const raw = String(sh.getRange(row, DSN.COL.raw).getDisplayValue() || '').trim();
+
+  if (!DSN.OVERWRITE_NORMALIZE && write) {
+    const existingStem = String(sh.getRange(row, DSN.OUT.stem).getDisplayValue() || '').trim();
+    if (existingStem) return { ok: true, type: 'SKIPPED_EXISTING', expected: null, warn: [], changedRaw: false };
+  }
+
+  const r = ds_classify_(key, raw, DSN);
+  const changedRaw = r.ok && r.rawOut != null && r.rawOut !== raw;
+  if (write) {
+    if (changedRaw) sh.getRange(row, DSN.COL.raw).setValue(r.rawOut);
+    writeNormResult_(sh, row, r);
+  }
+  return { ok: r.ok, type: r.type, expected: r.expected, warn: r.warn || [], changedRaw };
+}
+
+/** 여러 행 처리 + 통계 (UI 없음). Pipeline 과 메뉴가 공용 */
+function ds_normalizeRows_(sh, rows, opts) {
+  const st = { ok: 0, fail: 0, failRows: [], review: [], warnRows: {}, warnCount: {} };
+  for (const row of rows) {
+    try {
+      const r = ds_normalizeRow_(sh, row, opts);
+      if (r.type === 'SKIPPED_EXISTING') continue;
+      if (r.ok) st.ok++; else { st.fail++; st.failRows.push(row); }
+      if (/^NEED_REVIEW/.test(r.type)) st.review.push(row + ':' + r.type.replace('NEED_REVIEW:', ''));
+      (r.warn || []).forEach(w => {
+        const k = w.replace(/\(.*$/, '');
+        st.warnCount[k] = (st.warnCount[k] || 0) + 1;
+        (st.warnRows[k] = st.warnRows[k] || []).push(row + (w.includes('(') ? w.slice(w.indexOf('(')) : ''));
+      });
+    } catch (e) {
+      try { writeNormResult_(sh, row, { ok: false, type: 'EXCEPTION: ' + (e && e.message || String(e)) }); } catch (_) {}
+      st.fail++; st.failRows.push(row);
+    }
+  }
+  return st;
+}
+
+function ds_statSummary_(st) {
+  const lines = [`성공 ${st.ok}, 실패 ${st.fail}` + (st.failRows.length ? ` (행 ${st.failRows.join(', ')})` : '')];
+  if (st.review.length) lines.push(`검토 필요(NEED_REVIEW) ${st.review.length}건: ${st.review.join(', ')}`);
+  Object.keys(st.warnCount).forEach(k => {
+    const rows = st.warnRows[k] || [];
+    lines.push(`${k} ${st.warnCount[k]}건` + (rows.length && rows.length <= 40 ? `: ${rows.join(', ')}` : ''));
+  });
+  return lines.join('\n');
+}
+
+/* =================================================
+ * 4. 메뉴 진입점
+ * ================================================= */
+
+/** 메뉴 '⏺️ 문항 정규화': 행번호 입력(예: 15, 17, 123, 10-15) */
 function ds_runNormalizeAndValidate_byRowInput() {
   const ui = SpreadsheetApp.getUi();
   const res = ui.prompt('정규화+검증(문제) 행 번호 입력', '예: 15, 17, 123, 10-15', ui.ButtonSet.OK_CANCEL);
   if (res.getSelectedButton() !== ui.Button.OK) return;
-
   const rows = parseRowInput_(res.getResponseText());
   if (!rows.length) return;
 
-  const ss = SpreadsheetApp.getActive();
-  const sh = ss.getSheetByName(DSN.SHEET);
+  const sh = SpreadsheetApp.getActive().getSheetByName(DSN.SHEET);
   if (!sh) throw new Error(`시트 없음: ${DSN.SHEET}`);
 
-  let ok = 0, fail = 0;
+  const st = ds_normalizeRows_(sh, rows);
+  const msg = ds_statSummary_(st);
+  SpreadsheetApp.getActive().toast(`정규화 완료: 성공 ${st.ok}, 실패 ${st.fail}` + (st.review.length ? `, 검토 ${st.review.length}` : ''), 'Data_DS', 5);
+  if (st.review.length || Object.keys(st.warnCount).length) ui.alert('정규화 결과', msg, ui.ButtonSet.OK);
+}
 
-  for (const row of rows) {
-    try {
-      // C열(해설): 문항번호 바로 뒤에 오는 '정답 (n)'을 원문자로 통일
-      //  - 문제(B) 정규화와 독립적으로 처리하며, 실패해도 문제 정규화에 영향 없음
-      try {
-        const solCell = sh.getRange(row, DSN.COL.solution);
-        const solRaw = String(solCell.getDisplayValue() || '');
-        if (solRaw) {
-          const solNorm = normalizeSolutionAnswerMarker_(solRaw);
-          if (solNorm !== solRaw) solCell.setValue(solNorm);
-        }
-      } catch (eSol) { /* 해설 정규화 오류는 무시 */ }
+/**
+ * 메뉴 '🔎 정규화 점검(쓰기 없음)': 입력 범위(비우면 전체)를 새 판정으로 돌려 보고
+ *  현재 K 와 달라지는 행만 목록으로 보여준다. 시트는 건드리지 않는다.
+ *  → 기존 행 재정규화 대상 선정용 (D-7)
+ */
+function ds_auditNormalize_byRowInput() {
+  const ui = SpreadsheetApp.getUi();
+  const res = ui.prompt('정규화 점검 (쓰기 없음)', '행 범위 (예: 2-3000). 비우면 전체', ui.ButtonSet.OK_CANCEL);
+  if (res.getSelectedButton() !== ui.Button.OK) return;
+  const sh = SpreadsheetApp.getActive().getSheetByName(DSN.SHEET);
+  if (!sh) throw new Error(`시트 없음: ${DSN.SHEET}`);
 
-      const raw = String(sh.getRange(row, DSN.COL.raw).getDisplayValue() || '').trim();
-      if (!raw) {
-        writeNormResult_(sh, row, { ok: false, reason: 'RAW_EMPTY' });
-        fail++;
-        continue;
-      }
+  let rows = parseRowInput_(res.getResponseText());
+  const last = sh.getLastRow();
+  if (!rows.length) { rows = []; for (let r = 2; r <= last; r++) rows.push(r); }
+  if (!rows.length) { ui.alert('데이터 없음'); return; }
 
-      // overwrite=false면 이미 stem(E)이 있으면 skip
-      if (!DSN.OVERWRITE_NORMALIZE) {
-        const existingStem = String(sh.getRange(row, DSN.OUT.stem).getDisplayValue() || '').trim();
-        if (existingStem) continue;
-      }
-
-      // 1) MCQ 파싱 시도
-      const mcq = parseMcqFromRaw_(raw);
-
-      if (mcq.ok) {
-        const answer_type = detectAnswerTypeFromChoices_(mcq.choices);
-
-        // type에 따라 choice 정규화 후, 번호는 항상 원문자 ①~⑤ 마커로 부착
-        let choicesOut = mcq.choices.slice();
-        if (answer_type === 'mcq_math') {
-          choicesOut = choicesOut.map((x, i) => attachCircledMarker_(normalizeChoiceToLatex_(x), i));
-        } else {
-          // mcq_combo
-          choicesOut = choicesOut.map((x, i) => attachCircledMarker_(normalizeComboChoice_(x), i));
-        }
-
-        // B열 원본의 선지 번호도 원문자 ①~⑤로 통일하여 덮어쓰기(5지선다 확정 행만)
-        const rawNorm = normalizeChoiceMarkersInText_(raw);
-        if (rawNorm !== raw) sh.getRange(row, DSN.COL.raw).setValue(rawNorm);
-
-        writeNormResult_(sh, row, {
-          ok: true,
-          stem: mcq.stem,
-          choices: choicesOut,
-          type: answer_type
-        });
-        ok++;
-        continue;
-      }
-
-      // 2) MCQ 아니면 단답형으로 분류
-      writeNormResult_(sh, row, {
-        ok: true,
-        stem: raw,
-        choices: ['', '', '', '', ''],
-        type: 'short_int'
-      });
-      ok++;
-
-    } catch (e) {
-      writeNormResult_(sh, row, { ok: false, reason: 'EXCEPTION: ' + (e?.message || String(e)) });
-      fail++;
-    }
+  const minR = Math.min(...rows), maxR = Math.max(...rows);
+  const block = sh.getRange(minR, 1, maxR - minR + 1, DSN.OUT.type).getValues();
+  const rowSet = new Set(rows);
+  const changes = [], review = [], mismatch = [];
+  for (let r = minR; r <= maxR; r++) {
+    if (!rowSet.has(r)) continue;
+    const v = block[r - minR];
+    const key = String(v[DSN.COL.key - 1] || '').trim(), raw = String(v[DSN.COL.raw - 1] || '').trim();
+    if (!key && !raw) continue;
+    const curK = String(v[DSN.OUT.type - 1] || '').trim();
+    const c = ds_classify_(key, raw, DSN);
+    if (c.type !== curK) changes.push(`${r}: ${curK || '(빈칸)'} → ${c.type}`);
+    if (/^NEED_REVIEW/.test(c.type)) review.push(r);
+    (c.warn || []).forEach(w => { if (w.startsWith('NUM_MISMATCH')) mismatch.push(r + ' ' + w); });
   }
-
-  SpreadsheetApp.getActive().toast(`정규화 완료: 성공 ${ok}, 실패 ${fail}`, 'Data_DS', 5);
+  const lines = [
+    `점검 ${rows.length}행 — K 가 달라지는 행 ${changes.length}건, 검토 필요 ${review.length}건, 번호 불일치 ${mismatch.length}건`,
+    '', '[K 변경]', ...changes.slice(0, 60), changes.length > 60 ? `… 외 ${changes.length - 60}건` : '',
+    '', '[번호 불일치 (key ≠ 인쇄 번호)]', ...mismatch.slice(0, 30), mismatch.length > 30 ? `… 외 ${mismatch.length - 30}건` : ''
+  ].filter(s => s !== undefined);
+  const text = lines.join('\n');
+  Logger.log(text);
+  ui.alert('정규화 점검 결과 (시트 변경 없음)', text.length > 3500 ? text.slice(0, 3500) + '\n…(전체는 실행 로그 참조)' : text, ui.ButtonSet.OK);
 }

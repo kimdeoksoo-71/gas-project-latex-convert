@@ -204,6 +204,11 @@ const _MPF = (function () {
       const esc = L.url.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       text = text.replace(new RegExp('!\\[[^\\]]*\\]\\(' + esc + '\\)', 'g'), () => CFG.FIG_TAG(name));
     });
+    // v3/pdf mmd 는 문항을 \begin{itemize}\item[7.] … \end{itemize} 로 감싸는 경우가 있어 "7. …" 로 풀어준다
+    //  (정규화의 인쇄 번호 인식·해설 정답 추출의 문항번호 토큰 "7." 이 그대로 동작하도록)
+    text = text
+      .replace(/^\s*\\begin\{itemize\}\s*\\item\[\s*([^\]]*?)\s*\]\s*/, '$1 ')
+      .replace(/\s*\\end\{itemize\}\s*$/, '');
     return { names, links: urls, mmd: text };
   }
 

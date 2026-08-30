@@ -24,8 +24,7 @@
  *   getFolderByPath, collectPngNameUrlPairs (링크&파일명 추출(키워드).gs)
  *   mpr_convertRows              (Mathpix 범위 자동변환.gs — _MPR 에 패치 필요)
  *   dlds_parseFilename_, dlds_lastDataRow_, ds_fillGivenAnswerRows_, DLDS (DataLatex_to_DataDS.gs)
- *   parseMcqFromRaw_, detectAnswerTypeFromChoices_, normalizeChoiceToLatex_,
- *   normalizeComboChoice_, writeNormResult_, DSN (normalizeProblem.gs)
+ *   ds_normalizeRows_, ds_statSummary_, DSN (normalizeProblem.gs 2026-08-30 보완판 — 메뉴 '문항 정규화'와 같은 코어)
  *************************************************/
 
 const PL = {
@@ -210,8 +209,7 @@ function pl_runStage_(st, deadline) {
     case 'normalize': {
       const rows = pl_range_(st.ds.writeStart, st.ds.writeEnd);
       st.norm = pl_normalizeRows_(ss, rows);
-      pl_log_(st, 'normalize', `정규화 성공 ${st.norm.ok}, 실패 ${st.norm.fail}` +
-        (st.norm.failRows.length ? ` (행 ${st.norm.failRows.join(', ')})` : ''));
+      pl_log_(st, 'normalize', ds_statSummary_(st.norm).replace(/\n/g, ' / '));
       st.stage = (PL.NORMALIZE_BEFORE_ANSWER && !st.ans) ? 'answer' : 'done'; return 'next';
     }
 
@@ -306,35 +304,15 @@ function pl_sendPairs_(ss, startRow, endRow) {
   return out;
 }
 
-/** ds_runNormalizeAndValidate_byRowInput 의 UI 없는 버전 */
+/** 문항 정규화 (메뉴 '⏺️ 문항 정규화' 와 동일한 코어 ds_normalizeRows_ 사용)
+ *  반환: { ok, fail, failRows, review[], warnCount{}, warnRows{} }
+ *   - review  : K=NEED_REVIEW:… 로 남긴 행 (객관식 번호인데 선지 5개를 못 찾음)
+ *   - warnCount: TRAILER_DROPPED / NUM_MISMATCH / CHOICE_ORDER_… 등 경고 집계
+ */
 function pl_normalizeRows_(ss, rows) {
   const sh = ss.getSheetByName(DSN.SHEET);
-  const st = { ok: 0, fail: 0, failRows: [] };
-  for (const row of rows) {
-    try {
-      const raw = String(sh.getRange(row, DSN.COL.raw).getDisplayValue() || '').trim();
-      if (!raw) { writeNormResult_(sh, row, { ok: false, reason: 'RAW_EMPTY' }); st.fail++; st.failRows.push(row); continue; }
-      if (!DSN.OVERWRITE_NORMALIZE) {
-        const existingStem = String(sh.getRange(row, DSN.OUT.stem).getDisplayValue() || '').trim();
-        if (existingStem) continue;
-      }
-      const mcq = parseMcqFromRaw_(raw);
-      if (mcq.ok) {
-        const type = detectAnswerTypeFromChoices_(mcq.choices);
-        const choices = type === 'mcq_math'
-          ? mcq.choices.map(x => normalizeChoiceToLatex_(x))
-          : mcq.choices.map(x => normalizeComboChoice_(x));
-        writeNormResult_(sh, row, { ok: true, stem: mcq.stem, choices, type });
-      } else {
-        writeNormResult_(sh, row, { ok: true, stem: raw, choices: ['', '', '', '', ''], type: 'short_int' });
-      }
-      st.ok++;
-    } catch (e) {
-      writeNormResult_(sh, row, { ok: false, reason: 'EXCEPTION: ' + (e && e.message || String(e)) });
-      st.fail++; st.failRows.push(row);
-    }
-  }
-  return st;
+  if (!sh) throw new Error(`${DSN.SHEET} 시트를 찾을 수 없습니다.`);
+  return ds_normalizeRows_(sh, rows);
 }
 
 /* =================================================
@@ -379,7 +357,7 @@ function pl_summary_(st) {
   if (s.length) lines.push(`검색: ` + s.map(([k, n]) => `${k}=${n}`).join(', '));
   if (st.latex) lines.push(`Latex 변환: 성공 ${st.latex.ok}, 실패 ${st.latex.err}`);
   if (st.ds) lines.push(`Data_DS: ${st.ds.count}행 추가 (행 ${st.ds.writeStart}~${st.ds.writeEnd})`);
-  if (st.norm) lines.push(`정규화: 성공 ${st.norm.ok}, 실패 ${st.norm.fail}` + (st.norm.failRows.length ? ` (행 ${st.norm.failRows.join(', ')})` : ''));
+  if (st.norm) lines.push(`정규화: ` + ds_statSummary_(st.norm).replace(/\n/g, '\n        '));
   if (st.ans) lines.push(`정답: 성공 ${st.ans.ok}, 미검출 ${st.ans.miss.length}` +
     (st.ans.miss.length ? ` (행 ${st.ans.miss.join(', ')})` : '') +
     (st.ans.conflict.length ? `, 유형 불일치 행 ${st.ans.conflict.join(', ')}` : ''));

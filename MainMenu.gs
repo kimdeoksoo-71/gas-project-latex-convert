@@ -8,6 +8,7 @@ function onOpen() {
   mainMenu.addItem('선택셀 사이드바 보기','showCellPreviewSidebar')
   mainMenu.addItem('첫번째 셀로 합치기','mergeSelectedCellsToTopAndClearRest');
   mainMenu.addItem('⏺️ 문항 정규화', 'ds_runNormalizeAndValidate_byRowInput');
+  mainMenu.addItem('🔎 정규화 점검 (쓰기 없음)', 'ds_auditNormalize_byRowInput');
   mainMenu.addSeparator();
   mainMenu.addItem('▶ 원클릭 파이프라인 (키워드 → Data_DS)', 'pipeline_start');
   mainMenu.addItem('⏹ 파이프라인 중지', 'pipeline_stop');
