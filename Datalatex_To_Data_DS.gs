@@ -167,7 +167,7 @@ function dl_sendPairsToDataDS() {
 
 /** 파일명 → { key, kind } / 표지가 없으면 null */
 function dlds_parseFilename_(fname) {
-  let name = String(fname).trim().replace(/\.[A-Za-z0-9]{1,5}$/, ''); // 확장자 제거
+  let name = nfc_(fname).trim().replace(/\.[A-Za-z0-9]{1,5}$/, '');
   const iP = name.indexOf(DLDS.TAG_PROBLEM);
   const iS = name.indexOf(DLDS.TAG_SOLUTION);
   if (iP < 0 && iS < 0) return null;

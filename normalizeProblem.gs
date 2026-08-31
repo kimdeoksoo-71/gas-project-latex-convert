@@ -20,8 +20,8 @@
  *  4) mcq_math / mcq_combo 구별은 기존 기준(선지에 ㄱ/ㄴ/ㄷ 포함 여부) 그대로
  *
  * 부수 효과(제자리 덮어쓰기)
- *  - B열: mcq 확정 행의 선지 마커 5곳만 ①~⑤ 로 통일 (DSN.REWRITE_RAW_MARKERS)
- *  - C열: 첫머리 "정답 (n)" → "정답 ⓝ" (기존 normalizeSolutionAnswerMarker_)
+ *  - B열: itemize 래퍼 제거(DSN.UNWRAP_ITEMIZE) + mcq 확정 행의 선지 마커 5곳만 ①~⑤ 로 통일 (DSN.REWRITE_RAW_MARKERS)
+ *  - C열: 첫머리 "정답 (n)" → "정답 ⓝ" (기존) + itemize 래퍼 제거
  *
  * 진입점
  *  - 메뉴 '⏺️ 문항 정규화'      : ds_runNormalizeAndValidate_byRowInput  (행 범위 입력)
@@ -41,7 +41,7 @@ const DSN = {
   SKIP_PARSE_FOR_SHORT: true,      // 번호가 단답형이면 선지 파싱 생략
   MCQ_FAIL_POLICY: 'review',       // 'review' → K=NEED_REVIEW:MCQ_… | 'short' → 예전처럼 short_int
   REWRITE_RAW_MARKERS: 'chain',    // 'chain' 선지 마커 5곳만 ①~⑤ 로 치환 | 'none' B열 보존
-  UNWRAP_ITEMIZE: true             // stem 의 \begin{itemize}\item[7.] … \end{itemize} (그림 추출 mmd) 를 "7. …" 로
+  UNWRAP_ITEMIZE: true             // B·C·E·F~J 의 \begin{itemize}\item[X] … \end{itemize} 래퍼를 모두 벗기고 알맹이만 남김
 };
 
 const CIRCLED_NUMS = ['①', '②', '③', '④', '⑤'];      // idx 0~4 → 선지 1~5
@@ -209,17 +209,36 @@ function attachCircledMarker_(content, idx) {
   return c ? (marker + ' ' + c) : marker;
 }
 
-/** 그림 추출(v3/pdf mmd)이 문항을 \begin{itemize}\item[7.] … \end{itemize} 로 감싸는 경우 풀어준다 */
+/**
+ * itemize/enumerate 래퍼 완전 제거 — 알맹이만 남긴다.
+ *  Mathpix(v3/pdf mmd)가 행 첫머리의 번호·기호("7.", "-", "(i)", "이 …")를 보고 곳곳을
+ *  \begin{itemize}\item[X] … \end{itemize} 로 감싸는데(중첩 포함), 수능 문항·해설에는 진짜 목록 구조가 필요 없다.
+ *   - \begin{itemize} / \end{itemize} (enumerate, description 포함) → 삭제
+ *   - \item[X] → "X " (X 가 비면 삭제),  \item (대괄호 없음) → "- "
+ *   - 각 항목은 자기 줄에서 시작하도록 유지, 줄 끝 공백·3줄 이상 연속 빈 줄 정리
+ *  DSN.UNWRAP_ITEMIZE=true 면 B(원문)·C(해설)·E·F~J 모두에 적용된다.
+ */
 function unwrapItemize_(s) {
-  return String(s ?? '')
-    .replace(/^\s*\\begin\{itemize\}\s*\\item\[\s*([^\]]*?)\s*\]\s*/, '$1 ')
-    .replace(/\s*\\end\{itemize\}\s*$/, '')
-    .trim();
+  let t = String(s ?? '').replace(/\r\n?/g, '\n');
+  if (!/\\(?:begin|end)\{(?:itemize|enumerate|description)\}|\\item\b/.test(t)) return t.trim();
+  t = t
+    .replace(/[ \t]*\\begin\{(?:itemize|enumerate|description)\}[ \t]*\n?/g, '')
+    .replace(/\n?[ \t]*\\end\{(?:itemize|enumerate|description)\}[ \t]*/g, '')
+    .replace(/(^|\n)[ \t]*\\item\[\s*\]\s*/g, '$1')                    // \item[]   → 제거
+    .replace(/(^|\n)[ \t]*\\item\[\s*([^\]]*?)\s*\][ \t]*/g, '$1$2 ')  // \item[X]  → "X "
+    .replace(/(^|\n)[ \t]*\\item\b[ \t]*/g, '$1- ')                    // \item     → "- "
+    .replace(/\\item\[\s*\]\s*/g, '')                                  // 줄 중간에 남은 것
+    .replace(/\\item\[\s*([^\]]*?)\s*\][ \t]*/g, '\n$1 ')
+    .replace(/\\item\b[ \t]*/g, '\n- ')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n');
+  return t.trim();
 }
 
 /** 순수 판정 코어: 시트 접근 없음. 반환값을 호출측이 기록한다. */
 function ds_classify_(key, raw, cfg) {
   cfg = cfg || DSN;
+  if (cfg.UNWRAP_ITEMIZE !== false) raw = unwrapItemize_(raw);   // itemize 래퍼는 판정 전에 벗긴다 (B열에도 반영됨)
   const exp = ds_expectedType_(key, raw);
   const warn = exp.warn.slice();
   const R = { expected: exp.expected, num: exp.num, warn, rawOut: raw };
@@ -233,16 +252,14 @@ function ds_classify_(key, raw, cfg) {
     const choices = mcq.choices.map((x, i) => attachCircledMarker_(type === 'mcq_math' ? normalizeChoiceToLatex_(x) : normalizeComboChoice_(x), i));
     warn.push(...(mcq.warn || []));
     const rawOut = (cfg.REWRITE_RAW_MARKERS === 'none') ? raw : rewriteRawMarkers_(raw, mcq.chain);
-    const stem = cfg.UNWRAP_ITEMIZE === false ? mcq.stem : unwrapItemize_(mcq.stem);
-    return Object.assign(R, { ok: true, type, stem, choices, rawOut, trailer: mcq.trailer });
+    return Object.assign(R, { ok: true, type, stem: mcq.stem, choices, rawOut, trailer: mcq.trailer });
   }
   if (mcq.ok && exp.expected === 'short') { warn.push('SHORT_BUT_CHOICES_FOUND'); }
   if (exp.expected === 'mcq') {
     if ((cfg.MCQ_FAIL_POLICY || 'review') === 'review')
       return Object.assign(R, { ok: false, type: 'NEED_REVIEW:MCQ_' + mcq.reason, stem: raw, choices: ['', '', '', '', ''] });
   }
-  const stemS = cfg.UNWRAP_ITEMIZE === false ? raw : unwrapItemize_(raw);
-  return Object.assign(R, { ok: true, type: 'short_int', stem: stemS, choices: ['', '', '', '', ''] });
+  return Object.assign(R, { ok: true, type: 'short_int', stem: raw, choices: ['', '', '', '', ''] });
 }
 
 /* =================================================
@@ -311,7 +328,11 @@ function ds_normalizeRow_(sh, row, opts) {
     try {
       const solCell = sh.getRange(row, DSN.COL.solution);
       const solRaw = String(solCell.getDisplayValue() || '');
-      if (solRaw) { const solNorm = normalizeSolutionAnswerMarker_(solRaw); if (solNorm !== solRaw) solCell.setValue(solNorm); }
+      if (solRaw) {
+        let solNorm = normalizeSolutionAnswerMarker_(solRaw);
+        if (DSN.UNWRAP_ITEMIZE !== false) solNorm = unwrapItemize_(solNorm);
+        if (solNorm !== solRaw) solCell.setValue(solNorm);
+      }
     } catch (_) {}
   }
 

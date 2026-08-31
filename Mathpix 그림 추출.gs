@@ -101,18 +101,29 @@ const _MPF = (function () {
   }
 
   /** PNG 와 같은 폴더에서 <stem>.pdf 찾기 → 없으면 Drive 전체 이름 검색 */
-  function findPdf_(pngLinkOrId, stem) {
-    const pdfName = stem + '.pdf';
+   function findPdf_(pngLinkOrId, stem) {
+    const base = String(stem || '') + '.pdf';
+    const cands = [base];
+    try {
+      const c = base.normalize('NFC'); if (cands.indexOf(c) < 0) cands.push(c);
+      const d = base.normalize('NFD'); if (cands.indexOf(d) < 0) cands.push(d);
+    } catch (_) {}
     try {
       const png = DriveApp.getFileById(extractFileId_(pngLinkOrId));
       const parents = png.getParents();
       while (parents.hasNext()) {
-        const it = parents.next().getFilesByName(pdfName);
-        if (it.hasNext()) return it.next();
+        const folder = parents.next();
+        for (const nm of cands) {
+          const it = folder.getFilesByName(nm);
+          if (it.hasNext()) return it.next();
+        }
       }
-    } catch (_) { /* PNG 링크가 이상해도 전체 검색으로 넘어감 */ }
-    const it = DriveApp.getFilesByName(pdfName);
-    return it.hasNext() ? it.next() : null;
+    } catch (_) { }
+    for (const nm of cands) {
+      const it = DriveApp.getFilesByName(nm);
+      if (it.hasNext()) return it.next();
+    }
+    return null;
   }
 
   // ===== Mathpix v3/pdf =====
@@ -187,6 +198,25 @@ const _MPF = (function () {
     return folder.createFile(blob);
   }
 
+  /** mmd 의 itemize/enumerate 래퍼 완전 제거 (normalizeProblem.gs 의 unwrapItemize_ 와 동일 규칙)
+   *  \begin/\end 삭제, \item[X] → "X ", \item[] → 삭제, \item → "- " */
+  function unwrapItemize_(s) {
+    let t = String(s || '').replace(/\r\n?/g, '\n');
+    if (!/\\(?:begin|end)\{(?:itemize|enumerate|description)\}|\\item\b/.test(t)) return t;
+    return t
+      .replace(/[ \t]*\\begin\{(?:itemize|enumerate|description)\}[ \t]*\n?/g, '')
+      .replace(/\n?[ \t]*\\end\{(?:itemize|enumerate|description)\}[ \t]*/g, '')
+      .replace(/(^|\n)[ \t]*\\item\[\s*\]\s*/g, '$1')
+      .replace(/(^|\n)[ \t]*\\item\[\s*([^\]]*?)\s*\][ \t]*/g, '$1$2 ')
+      .replace(/(^|\n)[ \t]*\\item\b[ \t]*/g, '$1- ')
+      .replace(/\\item\[\s*\]\s*/g, '')
+      .replace(/\\item\[\s*([^\]]*?)\s*\][ \t]*/g, '\n$1 ')
+      .replace(/\\item\b[ \t]*/g, '\n- ')
+      .replace(/[ \t]+\n/g, '\n')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim();
+  }
+
   /** 그림 내려받아 저장 + mmd 치환. 반환 { names:[], links:[], mmd } */
   function collectFigures_(mmd, stem, folder) {
     const links = parseImageLinks_(mmd);
@@ -206,10 +236,49 @@ const _MPF = (function () {
     });
     // v3/pdf mmd 는 문항을 \begin{itemize}\item[7.] … \end{itemize} 로 감싸는 경우가 있어 "7. …" 로 풀어준다
     //  (정규화의 인쇄 번호 인식·해설 정답 추출의 문항번호 토큰 "7." 이 그대로 동작하도록)
-    text = text
-      .replace(/^\s*\\begin\{itemize\}\s*\\item\[\s*([^\]]*?)\s*\]\s*/, '$1 ')
-      .replace(/\s*\\end\{itemize\}\s*$/, '');
+    //  중간에도 "이 시행을 …" 같은 문단을 \begin{itemize}\item[이] … 로 만드는 일이 있어 전역으로 푼다 (수능 문항에 실제 중첩 목록은 없음)
+    text = unwrapItemize_(text);
     return { names, links: urls, mmd: text };
+  }
+
+
+  /** ===== 패치 5: 해설 첫머리(문항번호·정답) 복원 =====
+   *  v3/pdf 는 페이지 맨 위에 따로 떨어져 있는 짧은 줄("9." / "정답 (2)")을 페이지 머리글로 보고 mmd 에서 빼 버린다.
+   *  v3/text 결과(D열)에는 남아 있으므로, 거기서 머리 블록을 떼어 mmd 앞에 되붙인다.
+   *  - 머리 블록: 앞쪽 4줄 안의 "N." 단독줄 / "N. 정답 …" / "정답 …" / 정답 토큰 단독줄(②, (2), 32)
+   *  - mmd 첫 줄이 이미 같은 번호 단독줄이면 중복되지 않게 걷어내고, mmd 앞쪽에 이미 '정답' 줄이 있으면 손대지 않는다.
+   *  - 문제(_문제) 행은 첫 줄이 긴 발문이라 머리 블록이 잡히지 않아 그대로 통과한다.
+   */
+  const HDR_NUM_RE   = /^\s*(\d{1,2})\s*[.)]\s*$/;                                    // "9."
+  const HDR_NUMANS_RE= /^\s*(\d{1,2})\s*[.)]\s*[\[【(]?\s*(?:정답|답)\b/;                // "9. 정답 (2)"
+  const HDR_ANS_RE   = /^\s*[\[【(]?\s*(?:정답|답)\s*[\]】)]?\s*[:：]?\s*\S*/;             // "정답 (2)" / "정답 : 32"
+  const HDR_TOKEN_RE = /^\s*\$?(?:[①②③④⑤]|\\textcircled\s*\{\s*[1-5]\s*\}|\(\s*[1-5]\s*\)|\d{1,3})\s*\$?\s*$/; // "②" / "(2)" / "32"
+
+  function headerBlockOf_(text) {
+    const lines = String(text || '').replace(/\r\n?/g, '\n').split('\n');
+    const out = []; let seen = 0, gotAns = false;
+    for (const ln of lines) {
+      if (!ln.trim()) { if (out.length) continue; else continue; }
+      seen++;
+      if (seen > 4) break;
+      if (HDR_NUMANS_RE.test(ln))                    { out.push(ln.trim()); gotAns = true; break; }
+      if (HDR_NUM_RE.test(ln) && !out.length)        { out.push(ln.trim()); continue; }
+      if (out.length && HDR_ANS_RE.test(ln))         { out.push(ln.trim()); gotAns = true; break; }
+      if (out.length && HDR_TOKEN_RE.test(ln))       { out.push(ln.trim()); gotAns = true; break; }
+      break;   // 번호 뒤에 본문이 바로 오면 머리 블록은 번호줄까지만
+    }
+    return { lines: out, hasAnswer: gotAns };
+  }
+
+  function mergeHeader_(mmd, text) {
+    const hdr = headerBlockOf_(text);
+    if (!hdr.lines.length) return mmd;                       // v3/text 에도 머리 블록이 없음 → 손대지 않음
+    let body = String(mmd || '').replace(/\r\n?/g, '\n');
+    const own = headerBlockOf_(body);
+    if (own.hasAnswer) return mmd;                           // mmd 에 이미 번호+정답 있음
+    if (!hdr.hasAnswer && own.lines.length) return mmd;      // 둘 다 번호만 → 그대로
+    if (own.lines.length) body = body.replace(/^\s*\d{1,2}\s*[.)][ \t]*\n?/, '');   // 번호 단독줄 중복 제거
+    return hdr.lines.join('\n\n') + '\n\n' + body.replace(/^\n+/, '');
   }
 
   // ===== 행 단위 처리 =====
@@ -245,6 +314,9 @@ const _MPF = (function () {
 
     const stem = stemOf_(vals[CFG.COLS.filename - 1]);
     const r = collectFigures_(mmd, stem, folder);
+    // 패치 5: v3/text 원본(D 가 있으면 D, 아니면 아직 교체 전인 C)에서 문항번호·정답 머리 블록을 되붙인다
+    const textOrig = String(vals[CFG.COLS.text - 1] || '') || String(vals[CFG.COLS.latex - 1] || '');
+    r.mmd = mergeHeader_(r.mmd, textOrig);
     const expected = diagramCount_(vals[CFG.COLS.diagram_boxes - 1]);
     sh.getRange(row, CFG.COLS.fig_status, 1, 4).setValues([[
       `done ${r.names.length}/${expected}`,
@@ -376,6 +448,55 @@ const _MPF = (function () {
     try { SpreadsheetApp.getActive().toast(msg, 'Mathpix 그림', 10); } catch (_) {}
   }
 
+
+  /** ===== 패치 5 복구: 이미 그림 추출이 끝난 행의 C(latex)·O(latex_fig) 에 머리 블록을 되붙이고,
+   *  Data_DS 에 이미 넘어간 같은 key 의 문제(B)/해설(C)도 고친 뒤 정규화·정답(D)을 다시 채운다.
+   *  범위: Data_Latex 전체 중 has_diagram=TRUE 이고 fig_status 가 done 이며 D(text) 가 있는 행 */
+  function repairHeaders_() {
+    const ui = SpreadsheetApp.getUi();
+    const sh = getSheet_();
+    if (!sh) { ui.alert(`시트 "${CFG.SHEET_NAME}" 없음`); return; }
+    const last = sh.getLastRow();
+    if (last < 2) { ui.alert('데이터 없음'); return; }
+    const data = sh.getRange(2, 1, last - 1, CFG.COLS.latex_fig).getValues();
+    const ds = SpreadsheetApp.getActive().getSheetByName('Data_DS');
+    const dsKeys = new Map();
+    if (ds && ds.getLastRow() >= 2) ds.getRange(2, 1, ds.getLastRow() - 1, 1).getValues().forEach((r, i) => { const k = String(r[0] || '').trim(); if (k) dsKeys.set(k, i + 2); });
+
+    let fixed = 0, dsFixed = 0; const dsRows = [], names = [];
+    data.forEach((vals, i) => {
+      const row = i + 2;
+      if (vals[CFG.COLS.has_diagram - 1] !== true) return;
+      if (!String(vals[CFG.COLS.fig_status - 1] || '').startsWith('done')) return;
+      const text = String(vals[CFG.COLS.text - 1] || ''); if (!text.trim()) return;
+      const fig  = String(vals[CFG.COLS.latex_fig - 1] || ''); if (!fig.trim()) return;
+      const merged = mergeHeader_(fig, text);
+      if (merged === fig) return;
+      sh.getRange(row, CFG.COLS.latex_fig).setValue(merged);
+      if (CFG.INTO_LATEX) sh.getRange(row, CFG.COLS.latex).setValue(merged);
+      fixed++;
+      const fname = String(vals[CFG.COLS.filename - 1] || '');
+      names.push(fname);
+      // Data_DS 반영
+      if (ds && typeof dlds_parseFilename_ === 'function') {
+        const p = dlds_parseFilename_(fname);
+        if (p && dsKeys.has(p.key)) {
+          const dsRow = dsKeys.get(p.key);
+          ds.getRange(dsRow, p.kind === 'problem' ? 2 : 3).setValue(merged);
+          if (p.kind !== 'problem') ds.getRange(dsRow, 4).setValue('');   // 정답(D) 다시 뽑도록 비움
+          dsFixed++; if (dsRows.indexOf(dsRow) < 0) dsRows.push(dsRow);
+        }
+      }
+    });
+    // Data_DS 정규화 + 정답 다시 채우기
+    let normMsg = '';
+    if (ds && dsRows.length) {
+      try { if (typeof ds_normalizeRows_ === 'function') { const st = ds_normalizeRows_(ds, dsRows); normMsg += `\n정규화: 성공 ${st.ok}, 실패 ${st.fail}`; } } catch (e) { normMsg += '\n정규화 오류: ' + e; }
+      try { if (typeof ds_fillGivenAnswerRows_ === 'function') { const a = ds_fillGivenAnswerRows_(ds, dsRows); normMsg += `\n정답(D): 성공 ${a.ok}, 미검출 ${a.miss.length}` + (a.miss.length ? ` (행 ${a.miss.join(', ')})` : ''); } } catch (e) { normMsg += '\n정답 채우기 오류: ' + e; }
+    }
+    ui.alert('머리 블록 복구', `Data_Latex 수정 ${fixed}행` + (names.length ? `\n${names.join('\n')}` : '') + `\nData_DS 수정 ${dsFixed}건 (행 ${dsRows.join(', ')})` + normMsg, ui.ButtonSet.OK);
+  }
+
   // ===== 메뉴 진입 =====
   function runRange_() {
     const ui = SpreadsheetApp.getUi();
@@ -415,10 +536,11 @@ const _MPF = (function () {
     try { SpreadsheetApp.getUi().alert('그림 추출을 중지했습니다. (submitted 상태인 행은 다음 실행 때 이어서 수집됩니다)'); } catch (_) {}
   }
 
-  return { CFG, COLS: CFG.COLS, runRange_, stop_, processBatch_, processRowSync_, parseImageLinks_, collectFigures_ };
+  return { CFG, COLS: CFG.COLS, runRange_, stop_, processBatch_, processRowSync_, parseImageLinks_, collectFigures_, mergeHeader_, repairHeaders_ };
 })();
 
 /** ===== 전역 래퍼 (메뉴/트리거용) ===== */
 function mpf_runRange()  { _MPF.runRange_(); }
 function mpf_stop()      { _MPF.stop_(); }
 function mpf__continue() { _MPF.processBatch_(); }   // 트리거가 호출
+function mpf_repairHeaders() { _MPF.repairHeaders_(); }  // 패치 5 복구 (메뉴)

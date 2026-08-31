@@ -153,10 +153,15 @@ const _MPR = (function () {
     return out;
   }
 
-  /** OCR 성공 결과를 행에 기록 (latex + diagram 정보). status 는 호출자가 정한다. 반환: dg */
-  function writeSuccess_(sh, row, result) {
-    const dg = extractDiagrams_(result);
-    sh.getRange(row, CFG.COLS.latex).setValue(result.text || '');
+ /** drive_link 셀에 줄바꿈(또는 |)으로 구분된 여러 링크 지원 (패치 7) */
+  function splitLinks_(s) {
+    return String(s || '').split(/[\n|]+/).map(t => t.trim()).filter(Boolean);
+  }
+ 
+  /** OCR 성공 결과를 행에 기록 (latex + diagram 정보). status 는 호출자가 정한다.
+   *  패치 7: (text, dg) 를 직접 받는다 — 조각 병합본을 기록할 수 있도록. */
+  function writeSuccess_(sh, row, text, dg) {
+    sh.getRange(row, CFG.COLS.latex).setValue(text || '');
     sh.getRange(row, CFG.COLS.last_error).setValue('');
     sh.getRange(row, CFG.COLS.processed_at).setValue(new Date());
     sh.getRange(row, CFG.COLS.has_diagram, 1, 2).setValues([[
@@ -165,6 +170,7 @@ const _MPR = (function () {
     ]]);
     return dg;
   }
+ 
 
   function writeError_(sh, row, err) {
     sh.getRange(row, CFG.COLS.status).setValue('error');
@@ -196,24 +202,37 @@ const _MPR = (function () {
     return 'done';
   }
 
-  /** 한 행 변환. 반환: 'done' | 'fig_pending' | false(링크 없음). 실패 시 throw
+/** 한 행 변환. 반환: 'done' | 'fig_pending' | false(링크 없음). 실패 시 throw
    *  status 가 fig_pending 이면 OCR 은 건너뛰고 그림 수집만 이어서 한다.
+   *  패치 7: drive_link 에 조각 링크가 여러 개면 조각별로 OCR 해 순서대로 이어붙인다.
    */
   function convertOneRow_(sh, row, creds, attempts, linkOrId, deadlineMs, status) {
     const resume = status === 'fig_pending';
     if (!resume) {
       sh.getRange(row, CFG.COLS.attempts).setValue(attempts + 1);
       sh.getRange(row, CFG.COLS.status).setValue('in_progress');
-
-      if (!linkOrId) {
+ 
+      const links = splitLinks_(linkOrId);
+      if (!links.length) {
         sh.getRange(row, CFG.COLS.status).setValue('error');
         sh.getRange(row, CFG.COLS.last_error).setValue('missing_drive_link');
         sh.getRange(row, CFG.COLS.processed_at).setValue(new Date());
         return false;
       }
-
-      const result = callMathpix_(creds, buildPayload_(driveFileToDataUrl_(linkOrId)));
-      const dg = writeSuccess_(sh, row, result);
+ 
+      const texts = [];
+      const multi = { w: 0, h: 0, n: 0, boxes: [], pieces: [] };
+      for (let i = 0; i < links.length; i++) {
+        const result = callMathpix_(creds, buildPayload_(driveFileToDataUrl_(links[i])));
+        texts.push(String(result.text || '').trim());
+        const d = extractDiagrams_(result);
+        multi.n += d.n;
+        multi.pieces.push(d);
+        if (i < links.length - 1) Utilities.sleep(150);
+      }
+      const dg = (links.length === 1) ? multi.pieces[0] : multi;
+      writeSuccess_(sh, row, texts.filter(function (t) { return t; }).join('\n\n'), dg);
+ 
       if (!(dg.n > 0 && figAvailable_())) {
         sh.getRange(row, CFG.COLS.status).setValue('done');
         return 'done';

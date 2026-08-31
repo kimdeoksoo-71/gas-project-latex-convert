@@ -3,6 +3,12 @@
  * - 메뉴: PBM 도구 > 이미지 검색·기록 실행
  ***********************/
 
+ /** 문자열을 완성형(NFC)으로 통일 */
+function nfc_(s) {
+  s = String(s == null ? '' : s);
+  return s.normalize ? s.normalize('NFC') : s;
+}
+
 function runSearchAndAppend() {
   const ui = SpreadsheetApp.getUi();
   const res = ui.prompt('PNG 파일명 검색', '파일명에 포함될 단어를 입력하세요 (예: 2021, 미적분 등)', ui.ButtonSet.OK_CANCEL);
@@ -38,16 +44,42 @@ function getFolderByPath(pathLike) {
   return cur;
 }
 
-/** 폴더(1레벨) 내 PNG만, 파일명에 keyword 포함된 항목 → [filename, url] */
+
+/** 한글 유니코드 완성형(NFC) 정규화 — 비교 전용 (패치 6) */
+function nfc_(s) {
+  s = String(s == null ? '' : s);
+  return s.normalize ? s.normalize('NFC') : s;
+}
+ 
+/** 폴더(1레벨) 내 PNG만, 파일명에 keyword 포함(NFC 로 비교) → [filename, url]
+ *  패치 6: 한글 NFC/NFD 정규화 불일치 흡수 (비교만 NFC, 기록은 원본명 기준)
+ *  패치 7: CroP 조각 파일 <이름>_c1.png, _c2.png … 는 한 항목으로 묶어
+ *          [<이름>.png, "url1\nurl2\n…"] (번호순) 으로 반환.
+ *          같은 기본 이름의 통짜 PNG(구버전 산출물)가 함께 있으면 조각을 우선한다. */
 function collectPngNameUrlPairs(folder, keyword) {
-  const kw = keyword.toLowerCase();
-  const out = [];
+  const kw = nfc_(keyword).toLowerCase();
+  const PIECE_RE = /_c(\d+)\.png$/i;
+  const singles = [];                 // [원본명, url]
+  const groups = new Map();           // NFC 기본이름 → { name: 원본 기본이름, parts: [{n, url}] }
   const files = folder.getFiles();
   while (files.hasNext()) {
     const f = files.next();
-    const name = f.getName(); if (!name) continue;
+    const raw = f.getName(); if (!raw) continue;
+    const name = nfc_(raw);
     const lower = name.toLowerCase();
-    if (lower.endsWith('.png') && lower.indexOf(kw) !== -1) out.push([name, f.getUrl()]);
+    if (!lower.endsWith('.png') || lower.indexOf(kw) === -1) continue;
+    const m = name.match(PIECE_RE);
+    if (!m) { singles.push([raw, f.getUrl()]); continue; }
+    const key = name.replace(PIECE_RE, '.png');
+    if (!groups.has(key)) groups.set(key, { name: raw.replace(PIECE_RE, '.png'), parts: [] });
+    groups.get(key).parts.push({ n: Number(m[1]), url: f.getUrl() });
   }
+  const out = [];
+  singles.forEach(p => { if (!groups.has(nfc_(p[0]))) out.push(p); });   // 통짜보다 조각 우선
+  groups.forEach(g => {
+    g.parts.sort((a, b) => a.n - b.n);
+    out.push([g.name, g.parts.map(p => p.url).join('\n')]);
+  });
   return out;
 }
+ 
