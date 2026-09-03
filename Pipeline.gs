@@ -268,7 +268,7 @@ function pl_sendPairs_(ss, startRow, endRow) {
   const out = { count: 0, writeStart: 0, writeEnd: 0, skippedDup: [], onlyProblem: [], onlySolution: [] };
   if (endRow < startRow) return out;
 
-  const rows = src.getRange(startRow, 1, endRow - startRow + 1, DLDS.SRC.status).getValues();
+  const rows = src.getRange(startRow, 1, endRow - startRow + 1, DLDS.SRC.fig_links).getValues();   // 패치 11: N열까지
   const pairs = new Map(); let order = 0;
   rows.forEach(r => {
     const fname = String(r[DLDS.SRC.filename - 1] || '').trim();
@@ -277,7 +277,8 @@ function pl_sendPairs_(ss, startRow, endRow) {
     if (DLDS.SEND_ONLY_DONE && status !== 'done') return;
     const parsed = dlds_parseFilename_(fname);
     if (!parsed) return;
-    const latex = String(r[DLDS.SRC.latex - 1] || '');
+    const latex = dlds_embedFigLinks_(String(r[DLDS.SRC.latex - 1] || ''),
+                                      r[DLDS.SRC.fig_files - 1], r[DLDS.SRC.fig_links - 1]);   // 패치 11
     if (!pairs.has(parsed.key)) pairs.set(parsed.key, { problem: null, solution: null, order: order++ });
     const p = pairs.get(parsed.key);
     if (parsed.kind === 'problem') p.problem = latex; else p.solution = latex;

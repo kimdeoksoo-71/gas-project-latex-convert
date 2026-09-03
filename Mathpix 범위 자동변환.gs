@@ -25,12 +25,26 @@
  *   L열 fig_status 에만 사유를 남긴다 (나중에 메뉴 "그림 추출"로 따로 재시도).
  * - _MPF.CFG.INTO_LATEX=true(기본) 이면 그림이 1개 이상 저장된 행은 C열(latex)을 O열(latex_fig,
  *   \includegraphics 포함)로 바꾸고, 원래 v3/text 결과는 D열(text)에 보관한다.
+ *
+ * [패치 10 · LaTeX 정합성 검사]
+ * - 변환 직후 결과 LaTeX 의 괄호·구분자 정합성을 검사해 P열 latex_warn 에 기록한다.
+ *   검사 항목:
+ *     ① \right. / \left.  잔존  — Mathpix 가 닫는(여는) 괄호를 찾지 못했다는 신호
+ *     ② \left ↔ \right 짝 불일치
+ *     ③ ( ) 개수 불일치   ④ { } 개수 불일치(이스케이프 \{ \} 제외)   ⑤ [ ] 개수 불일치
+ *     ⑥ $ 구분자 홀수 개
+ *   예) 지수 분수가 닫는 괄호 위에 걸친 (2^3×3)^{1/3} 을 3^{1/3} 로 잘못 붙이고
+ *       닫는 괄호를 \right. 로 처리한 오인식 → ①·③ 에 걸림.
+ * - 걸린 행은 P열에 사유가 적히고 셀이 붉게 표시된다. 비면 정상.
+ * - 그림 추출(INTO_LATEX)로 C열이 latex_fig 로 교체된 뒤에는 교체본을 다시 검사한다.
  *************************************************/
 const _MPR = (function () {
   const CFG = {
     SHEET_NAME: 'Data_Latex',
     COLS: { filename:1, drive_link:2, latex:3, text:4, status:5, attempts:6, last_error:7, processed_at:8,
-            has_diagram:9, diagram_boxes:10 },
+            has_diagram:9, diagram_boxes:10, latex_warn:16 },        // P열 (K~O 는 그림 추출이 사용)
+    WARN_HEADER: 'latex_warn',                                       // P1
+    WARN_BG: '#fce8e6',                                              // 경고 셀 배경(연붉음)
     FIG: {
       ENABLED: true,            // OCR 직후 그림 추출까지 한 번에 (C열 교체 여부는 _MPF.CFG.INTO_LATEX)
       MAX_WAIT_MS: 150 * 1000   // 한 행의 그림 처리를 기다리는 최대 시간 (배치 deadline 이 더 가까우면 그쪽 우선)
@@ -57,6 +71,40 @@ const _MPR = (function () {
     if (!String(cur[0] || '').trim() && !String(cur[1] || '').trim()) {
       rng.setValues([CFG.DIAGRAM_HEADERS]);
     }
+    const wr = sh.getRange(1, CFG.COLS.latex_warn);                  // 패치 10: P1 헤더
+    if (!String(wr.getValue() || '').trim()) wr.setValue(CFG.WARN_HEADER);
+  }
+
+  /** ===== 패치 10: LaTeX 정합성 검사. 이상 없으면 '' ===== */
+  function lintLatex_(text) {
+    const t = String(text || '');
+    if (!t) return '';
+    const n = function (re) { return (t.match(re) || []).length; };
+    const warns = [];
+    const rdot = n(/\\right\s*\./g), ldot = n(/\\left\s*\./g);
+    if (rdot) warns.push('\\right. ' + rdot + '개(닫는 괄호 소실 의심)');
+    // \left. 는 정적분 계산막대 \left. … \right| 에서 정상적으로 쓰이므로 그만큼은 눈감아 준다
+    const evalBar = n(/\\right\s*\|/g);
+    if (ldot > evalBar) warns.push('\\left. ' + ldot + '개(여는 괄호 소실 의심)');
+    const nl = n(/\\left(?![a-zA-Z])/g), nr = n(/\\right(?![a-zA-Z])/g);   // \leftarrow 등 제외
+    if (nl !== nr) warns.push('\\left ' + nl + ' ≠ \\right ' + nr);
+    const po = n(/\(/g), pc = n(/\)/g);
+    if (po !== pc) warns.push('( ' + po + ' ≠ ) ' + pc);
+    const bo = n(/(?<!\\)\{/g), bc = n(/(?<!\\)\}/g);
+    if (bo !== bc) warns.push('{ ' + bo + ' ≠ } ' + bc);
+    const so = n(/\[/g), sc = n(/\]/g);
+    if (so !== sc) warns.push('[ ' + so + ' ≠ ] ' + sc);
+    if (n(/\$/g) % 2 === 1) warns.push('$ 홀수 개');
+    return warns.join(' / ');
+  }
+
+  /** 패치 10: 현재 C열 내용을 검사해 P열에 기록 (경고면 붉은 배경) */
+  function writeLint_(sh, row) {
+    const warn = lintLatex_(sh.getRange(row, CFG.COLS.latex).getValue());
+    const cell = sh.getRange(row, CFG.COLS.latex_warn);
+    cell.setValue(warn);
+    cell.setBackground(warn ? CFG.WARN_BG : null);
+    return warn;
   }
 
   function getMathpixCreds_() {
@@ -168,6 +216,7 @@ const _MPR = (function () {
       dg.n > 0,
       dg.n > 0 ? JSON.stringify(dg) : ''
     ]]);
+    writeLint_(sh, row);                                   // 패치 10
     return dg;
   }
  
@@ -197,6 +246,7 @@ const _MPR = (function () {
       return 'fig_pending';
     }
     // r === 'done' 이면 _MPF 가 (INTO_LATEX 설정에 따라) C열 교체까지 끝낸 상태
+    writeLint_(sh, row);                                   // 패치 10: 교체본 재검사
     sh.getRange(row, CFG.COLS.status).setValue('done');
     sh.getRange(row, CFG.COLS.processed_at).setValue(new Date());
     return 'done';

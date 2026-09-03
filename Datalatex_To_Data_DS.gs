@@ -26,6 +26,15 @@
  *   - 원문자(①~⑤), \textcircled{n}, (n) [n=1~5] → 객관식 정답
  *   - 3자리 이하 정수(뒤에 글자·숫자가 붙지 않는 것) → 주관식 정답
  *   - 위치에서 못 찾으면 해설 전체에서 '정답 …' 키워드 패턴을 마지막으로 한 번 더 찾는다.
+ *
+ * [패치 11 · 2026-09-01 — 그림 링크를 본문에 실어 보내기]
+ *   그림 추출(패치 3~5)의 산출물(M열 fig_files, N열 fig_links)은 Data_Latex 에만 남고
+ *   Data_DS 로는 C열 본문 속 \includegraphics{파일명} 태그(파일명만)만 넘어가,
+ *   하위 단계(문제검토 파일·검증 LLM)가 그림을 찾아갈 방법이 없었다.
+ *   → 이관 시 M/N열을 읽어 \includegraphics{파일명} 을 ![파일명](Drive링크) 로 치환한다.
+ *     그림 정보가 본문 자체에 실리므로 Data_DS 열 구조·하위 이관 코드는 그대로 두면 되고,
+ *     정규화(normalizeProblem)는 '![' 도 그림 블록으로 이미 취급하므로 안전하다.
+ *     검증 파이프라인은 이 링크로 이미지를 내려받아 모델에 첨부할 수 있다 (검토 파일 패치 12).
  *************************************************/
 
 const DLDS = {
@@ -33,7 +42,7 @@ const DLDS = {
   DST_SHEET: 'Data_DS',
 
   // Data_Latex 열
-  SRC: { filename: 1, latex: 3, status: 5 },
+  SRC: { filename: 1, latex: 3, status: 5, fig_files: 13, fig_links: 14 },   // M, N (패치 11)
 
   // Data_DS 열
   DST: { key: 1, problem: 2, solution: 3, answer: 4, type: 11 }, // A, B, C, D, K
@@ -90,7 +99,7 @@ function dl_sendPairsToDataDS() {
 
   // 2) Data_Latex 읽기 → 짝 만들기
   const n = endRow - startRow + 1;
-  const rows = src.getRange(startRow, 1, n, DLDS.SRC.status).getValues();
+  const rows = src.getRange(startRow, 1, n, DLDS.SRC.fig_links).getValues();   // 패치 11: N열까지
 
   const pairs = new Map(); // key → { problem, solution, order, pRow, sRow }
   let order = 0;
@@ -103,7 +112,8 @@ function dl_sendPairsToDataDS() {
     const parsed = dlds_parseFilename_(fname);
     if (!parsed) return; // _문제/_해설 표지가 없는 파일명은 무시
 
-    const latex = String(r[DLDS.SRC.latex - 1] || '');
+    const latex = dlds_embedFigLinks_(String(r[DLDS.SRC.latex - 1] || ''),
+                                      r[DLDS.SRC.fig_files - 1], r[DLDS.SRC.fig_links - 1]);   // 패치 11
     if (!pairs.has(parsed.key)) pairs.set(parsed.key, { problem: null, solution: null, order: order++, pRow: 0, sRow: 0 });
     const p = pairs.get(parsed.key);
     if (parsed.kind === 'problem')  { p.problem  = latex; p.pRow = startRow + i; }
@@ -163,6 +173,22 @@ function dl_sendPairsToDataDS() {
   if (onlySolution.length) msg += `문제 없음(건너뜀): ${onlySolution.join(', ')}\n`;
   if (skippedDup.length)   msg += `이미 존재하여 건너뜀: ${skippedDup.length}건\n`;
   ui.alert('완료', msg, ui.ButtonSet.OK);
+}
+
+/** [패치 11] \includegraphics{파일명} → ![파일명](Drive링크)
+ *  M열(fig_files, 쉼표 구분)과 N열(fig_links, 줄바꿈 구분)을 같은 순서로 짝지어 치환한다.
+ *  링크를 못 찾은 태그는 그대로 둔다. */
+function dlds_embedFigLinks_(latex, figFiles, figLinks) {
+  let t = String(latex || '');
+  if (!t || t.indexOf('\\includegraphics') < 0) return t;
+  const names = String(figFiles || '').split(',').map(s => nfc_(s.trim())).filter(Boolean);
+  const links = String(figLinks || '').split(/\n+/).map(s => s.trim()).filter(Boolean);
+  const map = {};
+  names.forEach((nm, i) => { if (links[i]) map[nm] = links[i]; });
+  return t.replace(/\\includegraphics\s*\{([^}]+)\}/g, (m, name) => {
+    const key = nfc_(String(name).trim());
+    return map[key] ? ('![' + key + '](' + map[key] + ')') : m;
+  });
 }
 
 /** 파일명 → { key, kind } / 표지가 없으면 null */
