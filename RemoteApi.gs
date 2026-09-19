@@ -15,7 +15,7 @@
  */
 
 const RAPI = {
-  VERSION:    'latex-1.0.1',
+  VERSION:    'latex-1.0.0',
   PROJECT:    'latex-convert',
   TOKEN_PROP: 'REMOTE_TOKEN',
   LOG_TAIL:   20,
@@ -31,7 +31,6 @@ function doGet(e) {
       case 'start':  return rapi_json_(rapi_start_(p));
       case 'status': return rapi_json_(rapi_status_());
       case 'stop':   return rapi_json_(pipeline_stopCore_('원격 중지 (RemoteApi)'));
-      case 'imagecheck': return rapi_json_(rapi_imagecheck_(p));
       default:       return rapi_json_({ ok: false, reason: 'unknown cmd: ' + p.cmd });
     }
   } catch (err) {
@@ -51,64 +50,12 @@ function rapi_ping_() {
  * ⚠️ audition과 달리 키워드를 NFC 정규화하지 않는다 — 이 프로젝트의
  *    `pipeline_start`가 원래 그렇게 동작했고, 동작을 바꾸지 않기 위함이다.
  */
-function rapi_keywords_(raw) {
-  return Array.from(new Set(
-    String(raw || '').split(/[,\n;]+/).map(s => s.trim()).filter(Boolean)
-  ));
-}
-
 function rapi_start_(p) {
-  const keywords = rapi_keywords_(p.keywords);
+  const keywords = Array.from(new Set(
+    String(p.keywords || '').split(/[,\n;]+/).map(s => s.trim()).filter(Boolean)
+  ));
   if (!keywords.length) return { ok: false, reason: 'keywords 파라미터가 비어 있습니다.' };
   return pipeline_startCore_(keywords, { force: p.force === '1', deferTick: true });
-}
-
-/**
- * IMAGE_DS 사전 점검 (읽기 전용, 1.0.1). 러너의 `from_latex` 모드가 Latex를 시작하기 전에 부른다.
- * `search` 단계와 **같은 방식**으로 폴더를 찾고(getFolderByPath) 키워드를 맞춘다(NFC·소문자·부분일치).
- *
- * 2026-09-19 첫 실전에서 IMAGE_DS에 **해설만** 있어 Mathpix 46건을 쓰고도 Data_DS 0행이 됐다.
- * 같은 이름 파일 중복(94개)도 있었는데, 조각(_c1)이 겹치면 같은 조각이 Mathpix에 두 번 들어간다.
- * 이런 상태를 비용을 쓰기 전에 잡는다.
- *
- * 응답: { ok, folderId, scanned, newestCreated(ISO), now(ISO),
- *         byKeyword: { kw: { problem:[문항], solution:[문항], png, pdf, other:[이름…≤5] } },
- *         duplicates: n, dupSamples:[이름…≤10] }
- *   folderId는 러너가 설정의 고정 ID와 대조한다 — 동명 폴더가 생기면 search가 엉뚱한 폴더를 쓰기 때문.
- */
-function rapi_imagecheck_(p) {
-  const keywords = rapi_keywords_(p.keywords);
-  if (!keywords.length) return { ok: false, reason: 'keywords 파라미터가 비어 있습니다.' };
-  const folder = getFolderByPath(PL.SEARCH_FOLDER);
-  const kws = keywords.map(k => ({ k: k, l: nfc_(k).toLowerCase(), prob: {}, sol: {}, png: 0, pdf: 0, other: [] }));
-  const ITEM_RE = /_(문제|해설)_(.+?)(?:_c\d+)?\.(png|pdf)$/i;
-  const seen = {}, dupSamples = [];
-  let duplicates = 0, scanned = 0, newest = 0;
-  const files = folder.getFiles();
-  while (files.hasNext()) {
-    const f = files.next();
-    const name = nfc_(f.getName() || '');
-    const lower = name.toLowerCase();
-    const hits = kws.filter(o => lower.indexOf(o.l) !== -1);
-    if (!hits.length) continue;
-    scanned++;
-    newest = Math.max(newest, f.getDateCreated().getTime());
-    if (seen[name]) { duplicates++; if (dupSamples.length < 10) dupSamples.push(name); } else seen[name] = true;
-    const m = name.match(ITEM_RE);
-    hits.forEach(o => {
-      if (!m) { if (o.other.length < 5) o.other.push(name); return; }
-      if (m[3].toLowerCase() === 'png') o.png++; else o.pdf++;
-      (m[1] === '문제' ? o.prob : o.sol)[m[2]] = true;
-    });
-  }
-  const byKeyword = {};
-  kws.forEach(o => {
-    byKeyword[o.k] = { problem: Object.keys(o.prob).sort(), solution: Object.keys(o.sol).sort(),
-                       png: o.png, pdf: o.pdf, other: o.other };
-  });
-  return { ok: true, folderId: folder.getId(), scanned: scanned,
-           newestCreated: newest ? new Date(newest).toISOString() : null, now: new Date().toISOString(),
-           byKeyword: byKeyword, duplicates: duplicates, dupSamples: dupSamples };
 }
 
 /** 상태 조회 — 러너가 폴링해 정체를 판정한다(§7). 원본을 가공 없이 싣는다. */

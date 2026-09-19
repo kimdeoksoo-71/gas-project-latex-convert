@@ -138,7 +138,8 @@ const _MPR = (function () {
       math_block_delimiters: ['$$', '$$'],
       enable_tables: true,
       confidence_threshold: 0.0,
-      include_line_data: true          // ← 패치 1: 줄 단위 정보(그림 좌표 포함) 요청
+      include_line_data: true,         // ← 패치 1: 줄 단위 정보(그림 좌표 포함) 요청
+      include_equation_tags: true      // ← 식 번호 `⋯⋯ ㉠` 를 수식 안 \tag{ㄱ} 로 (기본 요청은 text 에서 버린다). 후처리는 MathpixTagNormalize.gs
     };
   }
 
@@ -274,7 +275,7 @@ const _MPR = (function () {
       const multi = { w: 0, h: 0, n: 0, boxes: [], pieces: [] };
       for (let i = 0; i < links.length; i++) {
         const result = callMathpix_(creds, buildPayload_(driveFileToDataUrl_(links[i])));
-        texts.push(String(result.text || '').trim());
+        texts.push(mpx_normalizeEquationTags_(String(result.text || '').trim()));   // \tag{ㄱ}→\tag{1} · equation*/align* 정리
         const d = extractDiagrams_(result);
         multi.n += d.n;
         multi.pieces.push(d);

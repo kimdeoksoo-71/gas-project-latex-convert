@@ -55,7 +55,8 @@ const _MPF = (function () {
       conversion_formats: {},
       math_inline_delimiters: ['$', '$'],
       math_block_delimiters: ['$$', '$$'],
-      rm_spaces: true
+      rm_spaces: true,
+      include_equation_tags: true    // 식 번호 `⋯⋯ ㉠` → \tag{ㄱ} (v3/text 와 같은 옵션. 후처리는 MathpixTagNormalize.gs)
     }
   };
 
@@ -316,7 +317,7 @@ const _MPF = (function () {
     const r = collectFigures_(mmd, stem, folder);
     // 패치 5: v3/text 원본(D 가 있으면 D, 아니면 아직 교체 전인 C)에서 문항번호·정답 머리 블록을 되붙인다
     const textOrig = String(vals[CFG.COLS.text - 1] || '') || String(vals[CFG.COLS.latex - 1] || '');
-    r.mmd = mergeHeader_(r.mmd, textOrig);
+    r.mmd = mpx_normalizeEquationTags_(mergeHeader_(r.mmd, textOrig));   // \tag{ㄱ}→\tag{1} · equation*/align* 정리
     const expected = diagramCount_(vals[CFG.COLS.diagram_boxes - 1]);
     sh.getRange(row, CFG.COLS.fig_status, 1, 4).setValues([[
       `done ${r.names.length}/${expected}`,
