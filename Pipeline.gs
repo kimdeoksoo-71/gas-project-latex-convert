@@ -76,22 +76,64 @@ function pipeline_start() {
     ui.ButtonSet.YES_NO);
   if (ok !== ui.Button.YES) return;
 
+  const r = pipeline_startCore_(keywords, { force: true, deferTick: false });
+  if (!r.ok) ui.alert('시작 실패', r.reason, ui.ButtonSet.OK);
+}
+
+/* =================================================
+ * 헤드리스 코어 (Phase 1) — UI를 절대 부르지 않는다
+ * ================================================= */
+
+/**
+ * 파이프라인 시작 코어. 메뉴(`pipeline_start`)와 원격 API(`RemoteApi.gs`)가 공유한다.
+ *
+ * @param {string[]} keywords
+ * @param {Object} opts
+ *   - `force`     {boolean} 진행 중인 파이프라인을 중단하고 새로 시작. 기본 false
+ *   - `deferTick` {boolean} true면 첫 tick을 직접 돌리지 않고 1분 뒤 트리거로 예약.
+ *                 헤드리스는 반드시 true — 웹앱 응답이 즉시 돌아가야 한다
+ * @return {{ok:boolean, reason?:string, runId?:string, stage?:string}}
+ */
+function pipeline_startCore_(keywords, opts) {
+  opts = opts || {};
+  keywords = (keywords || []).filter(Boolean);
+  if (!keywords.length) return { ok: false, reason: '키워드가 비어 있습니다.' };
+
+  const cur = pl_loadState_();
+  if (cur && !['done', 'error', 'stopped'].includes(cur.stage)) {
+    if (!opts.force) {
+      return { ok: false, reason: `이미 실행 중입니다 (단계: ${cur.stage}, 키워드: ${(cur.keywords || []).join(', ')}). force=1로 중단 후 시작할 수 있습니다.` };
+    }
+    pl_clearTriggers_();
+  }
+
   const st = {
     stage: 'clear', keywords, startedAt: new Date().toISOString(),
     resumes: 0, search: {}, latex: { ok: 0, err: 0 }, ds: null, norm: null, ans: null, error: ''
   };
   pl_saveState_(st);
   pl_log_(st, 'start', `키워드: ${keywords.join(' | ')}`);
-  pipeline_tick();
+
+  if (opts.deferTick) ScriptApp.newTrigger(PL.TICK_FN).timeBased().after(60 * 1000).create();
+  else pipeline_tick();
+  return { ok: true, runId: st.startedAt, stage: st.stage };
 }
 
 function pipeline_stop() {
+  pipeline_stopCore_('사용자 중지');
+  try { SpreadsheetApp.getUi().alert('파이프라인을 중지했습니다. (예약된 이어하기 트리거 삭제)'); } catch (_) {}
+}
+
+/** 중지 코어 (UI 없음) — 메뉴와 원격 API가 공유 */
+function pipeline_stopCore_(by) {
   const st = pl_loadState_();
   pl_clearTriggers_();
+  let stoppedFrom = '';
   if (st && !['done', 'error', 'stopped'].includes(st.stage)) {
-    st.stage = 'stopped'; pl_saveState_(st); pl_log_(st, 'stopped', '사용자 중지');
+    stoppedFrom = st.stage;
+    st.stage = 'stopped'; pl_saveState_(st); pl_log_(st, 'stopped', by || '중지');
   }
-  try { SpreadsheetApp.getUi().alert('파이프라인을 중지했습니다. (예약된 이어하기 트리거 삭제)'); } catch (_) {}
+  return { ok: true, stoppedFrom: stoppedFrom };
 }
 
 function pipeline_status() {
