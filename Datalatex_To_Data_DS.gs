@@ -62,6 +62,9 @@ const DLDS = {
 };
 
 const DLDS_CIRCLED = ['①', '②', '③', '④', '⑤'];
+// 줄 시작 정답 키워드: 정답 : / 정답) / [정답] / 【정답】 / 답 : / 정답 | (패치 6: 세로줄 | ｜ 구분자, 26K28)
+const DLDS_KW_RE      = /^[\[【(]?\s*(?:정답|답)\s*[\]】)]?\s*[:：)|｜]?\s*/;
+const DLDS_KW_ONLY_RE = /^[\[【(]?\s*(?:정답|답)\s*[\]】)]?\s*[:：|｜]?\s*$/;   // 키워드만 있는 줄 → 정답은 다음 줄
 
 /* =================================================
  * [명령 1] Data_Latex → Data_DS
@@ -318,6 +321,9 @@ function ds_extractAnswer_(text) {
   let tailIdx = 0;
   if (numRe.test(first)) {
     first = first.replace(numRe, '').trim();
+  } else if (/^\d{1,2}$/.test(first) && lines.length > 1 && DLDS_KW_RE.test(lines[1])) {
+    // 패치 6 (26K28): 마침표 없는 번호 단독줄 "10" 뒤에 "정답 | ②" → 번호다. (예전엔 10을 정답으로 읽었다)
+    first = '';
   }
 
   // 같은 줄
@@ -329,7 +335,7 @@ function ds_extractAnswer_(text) {
     ans = ds_matchAnswerAtStart_(lines[1], first === '');
     if (ans) return ans;
     // "정답" 키워드가 있으면 그 다음 줄까지 허용 (예: "정답\n②")
-    if (/^[\[【(]?\s*(?:정답|답)\s*[\]】)]?\s*[:：]?\s*$/.test(first) || /^[\[【(]?\s*(?:정답|답)\s*[\]】)]?\s*[:：]?\s*$/.test(lines[1])) {
+    if (DLDS_KW_ONLY_RE.test(first) || DLDS_KW_ONLY_RE.test(lines[1])) {
       const nxt = /^[\[【(]?\s*(?:정답|답)/.test(first) ? lines[1] : (lines[2] || '');
       ans = ds_matchToken_(nxt, true);
       if (ans) return ans;
@@ -351,7 +357,7 @@ function ds_extractAnswer_(text) {
   }
 
   // 3) 전체에서 '정답' 키워드 패턴 마지막 검색 (fallback)
-  const kwRe = /(?:정답|답)(?:은|는|이)?\s*[)\]】]?\s*[:：]?\s*(\$?(?:[①②③④⑤]|\\textcircled\s*\{\s*[1-5]\s*\}|\([1-5]\)|\d{1,3})\$?)(?![\d\w가-힣%]|\.\d)/g;
+  const kwRe = /(?:정답|답)(?:은|는|이)?\s*[)\]】]?\s*[:：|｜]?\s*(\$?(?:[①②③④⑤]|\\textcircled\s*\{\s*[1-5]\s*\}|\([1-5]\)|\d{1,3})\$?)(?![\d\w가-힣%]|\.\d)/g;
   let m, last = null;
   const whole = lines.join('\n');
   while ((m = kwRe.exec(whole)) !== null) last = m[1];
@@ -366,9 +372,8 @@ function ds_extractAnswer_(text) {
 function ds_matchAnswerAtStart_(line, allowBare) {
   if (!line) return null;
   // 키워드 제거: 정답 : / 정답) / [정답] / 【정답】 / 답 :
-  const kw = /^[\[【(]?\s*(?:정답|답)\s*[\]】)]?\s*[:：)]?\s*/;
-  if (kw.test(line)) {
-    return ds_matchToken_(line.replace(kw, ''), true);
+  if (DLDS_KW_RE.test(line)) {
+    return ds_matchToken_(line.replace(DLDS_KW_RE, ''), true);
   }
   return allowBare ? ds_matchToken_(line, false) : null;
 }

@@ -250,9 +250,11 @@ const _MPF = (function () {
    *  - mmd 첫 줄이 이미 같은 번호 단독줄이면 중복되지 않게 걷어내고, mmd 앞쪽에 이미 '정답' 줄이 있으면 손대지 않는다.
    *  - 문제(_문제) 행은 첫 줄이 긴 발문이라 머리 블록이 잡히지 않아 그대로 통과한다.
    */
-  const HDR_NUM_RE   = /^\s*(\d{1,2})\s*[.)]\s*$/;                                    // "9."
-  const HDR_NUMANS_RE= /^\s*(\d{1,2})\s*[.)]\s*[\[【(]?\s*(?:정답|답)\b/;                // "9. 정답 (2)"
-  const HDR_ANS_RE   = /^\s*[\[【(]?\s*(?:정답|답)\s*[\]】)]?\s*[:：]?\s*\S*/;             // "정답 (2)" / "정답 : 32"
+  // 패치 6 (2026-09-28, 26K28 실측): 번호에 마침표가 없고("10") 정답 구분자가 세로줄("정답 | ②")인 출판사.
+  //   번호 단독줄은 [.)] 없이도 인정, 정답 구분자에 | ｜ 추가. 머리가 복원되지 않아 46문항 중 14행의 정답이 통째로 사라졌었다.
+  const HDR_NUM_RE   = /^\s*(\d{1,2})\s*[.)]?\s*$/;                                   // "9." / "10"
+  const HDR_NUMANS_RE= /^\s*(\d{1,2})\s*[.)]\s*[\[【(]?\s*(?:정답|답)\b/;                // "9. 정답 (2)"  ⚠️ \b는 한글 뒤에서 안 걸림(패치 6에서 손대지 않음)
+  const HDR_ANS_RE   = /^\s*[\[【(]?\s*(?:정답|답)\s*[\]】)]?\s*[:：|｜]?\s*\S*/;          // "정답 (2)" / "정답 : 32" / "정답 | ②"
   const HDR_TOKEN_RE = /^\s*\$?(?:[①②③④⑤]|\\textcircled\s*\{\s*[1-5]\s*\}|\(\s*[1-5]\s*\)|\d{1,3})\s*\$?\s*$/; // "②" / "(2)" / "32"
 
   function headerBlockOf_(text) {
@@ -278,7 +280,7 @@ const _MPF = (function () {
     const own = headerBlockOf_(body);
     if (own.hasAnswer) return mmd;                           // mmd 에 이미 번호+정답 있음
     if (!hdr.hasAnswer && own.lines.length) return mmd;      // 둘 다 번호만 → 그대로
-    if (own.lines.length) body = body.replace(/^\s*\d{1,2}\s*[.)][ \t]*\n?/, '');   // 번호 단독줄 중복 제거
+    if (own.lines.length) body = body.replace(/^\s*\d{1,2}\s*[.)]?[ \t]*(?:\n|$)/, '');   // 번호 단독줄 중복 제거 (패치 6: 마침표 없는 번호도)
     return hdr.lines.join('\n\n') + '\n\n' + body.replace(/^\n+/, '');
   }
 

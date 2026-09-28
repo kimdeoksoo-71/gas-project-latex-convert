@@ -15,7 +15,7 @@
  */
 
 const RAPI = {
-  VERSION:    'latex-1.0.1',
+  VERSION:    'latex-1.0.2',
   PROJECT:    'latex-convert',
   TOKEN_PROP: 'REMOTE_TOKEN',
   LOG_TAIL:   20,
