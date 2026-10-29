@@ -16,7 +16,7 @@
  *
  *  상태 PL_STATE (v4 §3.2) — 목록은 개수+앞 20개만, 전체는 Pipeline_Report 시트 (R-03)
  *  정체·공백 (v4 §3.3) — lastTickAt / lastChangeAt / progress
- *  스크립트 속성 — PL_TICK_BUDGET_MS(240000) · PL_OCR_GAP_MS(15000) · LATEX_ARCH_SSID · PL_MPX_RATE_PER_MIN(50)
+ *  스크립트 속성 — PL_TICK_BUDGET_MS(240000) · PL_OCR_GAP_MS(15000) · LATEX_ARCH_SSID_<yyyy>(연도별 아카이브 파일) · PL_MPX_RATE_PER_MIN(50)
  *
  *  의존(기존 파일의 전역 함수):
  *   clearBelowHeader_            (Data1, Data_Latex 초기화.gs)
@@ -32,7 +32,7 @@ const PL = {
   TICK_FN: 'pipeline_tick',                 // 옛 트리거 정리용 (새 트리거는 만들지 않는다)
   TICK_BUDGET_PROP: 'PL_TICK_BUDGET_MS', TICK_BUDGET_DEFAULT: 240 * 1000,   // D13
   OCR_GAP_PROP: 'PL_OCR_GAP_MS',         OCR_GAP_DEFAULT: 15 * 1000,         // D13 (옛 40초 여유는 그림 동기 대기용)
-  ARCH_SSID_PROP: 'LATEX_ARCH_SSID',     ARCH_NAME: 'Latex_arch_2026-10',    // C-13
+  ARCH_SSID_PROP: 'LATEX_ARCH_SSID_',    ARCH_NAME: 'Latex_arch_',           // C-13 · 연도별(10/30 덕수님): 속성 LATEX_ARCH_SSID_<yyyy>, 파일 Latex_arch_<yyyy>
   LOCK_WAIT_MS: 3000,                       // C-16
   SEARCH_FOLDER: 'PBMAI/IMAGE_DS',
   DATA1_SHEET: 'Data1',
@@ -616,12 +616,28 @@ function pl_accumNorm_(st, r) {
   });
 }
 
+/** 연도별 아카이브 파일 Latex_arch_<yyyy>. 순서: 상태 ssId → 속성 LATEX_ARCH_SSID_<yyyy> → Drive 이름 검색(중복 생성 방지) → 생성 */
+function pl_archName_(st) {
+  if (!st.archive.year) st.archive.year = Utilities.formatDate(new Date(), 'Asia/Seoul', 'yyyy');
+  return PL.ARCH_NAME + st.archive.year;
+}
+
 function pl_archiveSs_(st) {
   const sp = PropertiesService.getScriptProperties();
-  let id = st.archive.ssId || sp.getProperty(PL.ARCH_SSID_PROP) || '';
+  const name = pl_archName_(st);
+  const prop = PL.ARCH_SSID_PROP + st.archive.year;
+  let id = st.archive.ssId || sp.getProperty(prop) || '';
   let ss = null;
   if (id) { try { ss = SpreadsheetApp.openById(id); } catch (_) { ss = null; } }
-  if (!ss) { ss = SpreadsheetApp.create(PL.ARCH_NAME); id = ss.getId(); sp.setProperty(PL.ARCH_SSID_PROP, id); }
+  if (!ss) {
+    try {                                                    // 속성이 지워졌어도 같은 이름 파일이 있으면 재사용
+      const it = DriveApp.getFilesByName(name);
+      while (it.hasNext()) { const f = it.next(); if (!f.isTrashed || !f.isTrashed()) { ss = SpreadsheetApp.openById(f.getId()); break; } }
+    } catch (_) { ss = null; }
+  }
+  if (!ss) ss = SpreadsheetApp.create(name);
+  id = ss.getId();
+  if (sp.getProperty(prop) !== id) sp.setProperty(prop, id);
   st.archive.ssId = id;
   return ss;
 }
@@ -652,7 +668,7 @@ function pl_stageArchive_(st, ss, deadline) {
   }
   st.archive.done = true;
   pl_report_(st, 'archive.sheet', last - 1, `${st.archive.ssId} / ${st.archive.sheet}`);
-  pl_log_(st, 'archive', `Data_Latex ${last - 1}행 → ${PL.ARCH_NAME} / ${st.archive.sheet}`);
+  pl_log_(st, 'archive', `Data_Latex ${last - 1}행 → ${pl_archName_(st)} / ${st.archive.sheet}`);
   st.stage = 'done'; return 'next';
 }
 
