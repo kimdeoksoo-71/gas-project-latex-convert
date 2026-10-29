@@ -152,9 +152,16 @@ const _MPF = (function () {
         Utilities.sleep(Math.min(700 * Math.pow(2, i) + Math.random() * 400, 15000));
         continue;
       }
-      throw new Error('HTTP ' + code + ': ' + res.getContentText().slice(0, 300));
+      throw new Error('HTTP ' + code + (i === tries - 1 ? ' (retry exhausted)' : '') + ': ' + res.getContentText().slice(0, 300));
     }
     throw new Error('retry exhausted: ' + url);
+  }
+  /** R1 #4: 오류 메시지의 HTTP 코드 (없으면 0) */
+  function httpCodeOf_(err) { const m = String(err && err.message || err).match(/HTTP (\d{3})/); return m ? Number(m[1]) : 0; }
+  function clipCell_(text) {                                                 // R1 s4: O열 5만 자 (Mathpix 범위 자동변환.gs clip_ 과 같은 규칙)
+    text = String(text == null ? '' : text);
+    if (text.length <= 49999) return text;
+    return text.slice(0, 49999 - 100) + '\n\n… [총 ' + text.length.toLocaleString() + '자 중 셀 한도 초과로 잘림]';
   }
 
   function submitPdf_(creds, pdfFile) {
@@ -335,16 +342,17 @@ const _MPF = (function () {
     const textOrig = String(vals[CFG.COLS.text - 1] || '') || String(vals[CFG.COLS.latex - 1] || '');
     r.mmd = mpx_normalizeEquationTags_(mergeHeader_(r.mmd, textOrig));   // \tag{ㄱ}→\tag{1} · equation*/align* 정리
     const expected = diagramCount_(vals[CFG.COLS.diagram_boxes - 1]);
+    // R1 s4: C/D 교체를 먼저, L:O 는 뒤에 — 그 사이에 죽으면 L 이 비어 다시 수집하지만 C 는 이미 교체본(applyIntoLatex_ 가 같으면 건너뜀)
+    if (CFG.INTO_LATEX && r.names.length > 0) {
+      applyIntoLatex_(sh, row, clipCell_(r.mmd));
+      if (typeof mpr_lintRow === 'function') mpr_lintRow(sh, row);      // 패치 13 C-03: 교체본 재검사
+    }
     sh.getRange(row, CFG.COLS.fig_status, 1, 4).setValues([[
       `done ${r.names.length}/${expected}`,
       r.names.join(', '),
       r.links.join('\n'),
-      r.mmd
+      clipCell_(r.mmd)
     ]]);
-    if (CFG.INTO_LATEX && r.names.length > 0) {
-      applyIntoLatex_(sh, row, r.mmd);
-      if (typeof mpr_lintRow === 'function') mpr_lintRow(sh, row);      // 패치 13 C-03: 교체본 재검사
-    }
     return 'done';
   }
 
@@ -391,6 +399,7 @@ const _MPF = (function () {
   }
 
   function processBatch_() {
+    if (typeof pl_isBusy_ === 'function' && pl_isBusy_()) return;   // R1 #3: 파이프라인 진행 중엔 옛 배치가 끼어들지 않는다
     const lock = LockService.getScriptLock();
     if (!lock.tryLock(30000)) return;
     try {
@@ -505,15 +514,25 @@ const _MPF = (function () {
       else unsub.push(row);
     }
 
-    // 2) 제출 — pending 이 chunk 미만이면 채운다
+    // 2) 제출 — pending 이 chunk 미만이면 채운다. R1 #4: 429/5xx 는 행에 쓰지 않고(L '' 유지) 같은 코드 연속 5건이면 throw
+    let streak = 0, lastCode = 0;
     while (unsub.length && pending.length < rp.chunk && Date.now() + 15000 < deadlineMs) {
       const row = unsub.shift();
       try {
         out.requests++;
         if (submitRow_(sh, row, creds, readRow(row))) { pending.push(row); out.submittedNow++; }
         else { out.noPdf++; out.noPdfRows.push(row); }
+        streak = 0;
       } catch (err) {
-        writeStatus_(sh, row, 'error: ' + String(err).slice(0, 300)); out.err++; out.errRows.push(row);
+        const code = httpCodeOf_(err);
+        if (code === 429 || code >= 500) {
+          out.left++;                                                  // 이 행은 L '' 그대로 — 다음 tick/resume fig 에서 다시
+          if (code === lastCode) streak++; else { streak = 1; lastCode = code; }
+          if (streak >= 5) throw new Error('연속 HTTP ' + code + ' 5건 (Mathpix 장애·한도) — resume fig 로 이어감: ' + String(err).slice(0, 200));
+        } else {
+          writeStatus_(sh, row, 'error: ' + String(err).slice(0, 300)); out.err++; out.errRows.push(row);
+          streak = 0;
+        }
       }
       Utilities.sleep(rp.submitGapMs);
     }
@@ -543,7 +562,7 @@ const _MPF = (function () {
       }
     }
     out.submitted = pending.length;
-    out.left = unsub.length;
+    out.left += unsub.length;
     return out;
   }
 

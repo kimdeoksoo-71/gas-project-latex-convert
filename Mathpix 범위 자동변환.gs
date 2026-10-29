@@ -357,6 +357,7 @@ const _MPR = (function () {
 
   /** ===== 배치 처리 (수동 시작 + 트리거 재개 공용) ===== */
   function processBatch_() {
+    if (typeof pl_isBusy_ === 'function' && pl_isBusy_()) return;   // R1 #3: 파이프라인 진행 중엔 옛 배치가 끼어들지 않는다
     const lock = LockService.getScriptLock();
     if (!lock.tryLock(30000)) return;
 
@@ -430,6 +431,7 @@ const _MPR = (function () {
     ensureDiagramHeader_(sh);
     const creds = getMathpixCreds_();
     const out = { attempted: 0, ok: 0, err: 0, stoppedByTime: false, withDiagram: 0, figPending: 0 };
+    let streak = 0, lastErr = '';                                      // R1 #4: 연속 실패 차단기
 
     for (const row of rows) {
       if (Date.now() > deadlineMs) { out.stoppedByTime = true; break; }
@@ -451,17 +453,22 @@ const _MPR = (function () {
         } else {
           out.err++;
         }
+        streak = 0;
       } catch (err) {
         writeError_(sh, row, err);
-        if (/^Error: image_too_large|^image_too_large/.test(String(err))) sh.getRange(row, CFG.COLS.attempts).setValue(CFG.MAX_ATTEMPTS);   // 패치 13 P-05
+        const msg = String(err && err.message || err);
+        // 패치 13 P-05 · R1 s9: 이미지 자체 문제(크기 초과, 401·429 아닌 4xx)는 재시도해도 같으니 즉시 포기
+        if (/image_too_large/.test(msg) || /Mathpix error 4\d\d/.test(msg) && !/Mathpix error (401|429)/.test(msg)) sh.getRange(row, CFG.COLS.attempts).setValue(CFG.MAX_ATTEMPTS);
         out.err++;
+        lastErr = msg.slice(0, 200);
+        if (++streak >= 10) throw new Error('연속 실패 10행: ' + lastErr);   // R1 #4: 장애·한도 소진 때 비용 폭주 차단 (행은 attempts<3 로 남아 resume latex 로 이어감)
       }
       Utilities.sleep(200);
     }
     return out;
   }
 
-  /** 패치 13: status='error' 인 행 번호 (A열 + E:F 만 읽음) */
+  /** 패치 13 · R1 #2: A열이 비어있지 않고 status !== 'done' 인 행 번호 (error·in_progress·빈칸 전부 — 대상 0행 시점의 non-done = 실패) */
   function errorRows_() {
     const sh = getSheet_();
     if (!sh) return [];
@@ -470,7 +477,7 @@ const _MPR = (function () {
     const a = sh.getRange(2, 1, last - 1, 1).getValues();
     const e = sh.getRange(2, CFG.COLS.status, last - 1, 1).getValues();
     const out = [];
-    a.forEach((r, i) => { if (String(r[0] || '').trim() && String(e[i][0] || '').trim() === 'error') out.push(i + 2); });
+    a.forEach((r, i) => { if (String(r[0] || '').trim() && String(e[i][0] || '').trim() !== 'done') out.push(i + 2); });
     return out;
   }
 

@@ -50,7 +50,8 @@ function rapi_ping_() {
  * 변환 시작 (패치 13: 상태만 만든다. 진행은 tick).
  *   keywords     : 쉼표/줄바꿈 구분 (필수, 대량 변환은 1개)
  *   force        : 1이면 진행 중인 파이프라인을 중단하고 새로 시작 (미보관 런도 덮어씀)
- *   until        : latex(기본) | fig | done
+ *   driver       : trigger(기본 — 러너·메뉴, 1분 트리거로 스스로 이어감) | pump(맥미니 펌프가 tick 호출, 트리거 없음)  R1 #1
+ *   until        : latex | fig | done (기본: trigger→done, pump→latex)
  *   fig          : 0이면 그림 단계 없이 send 로 (기본 1)
  *   skipExisting : 0이면 Data_DS 기존 key 도 변환 (기본 1)
  *
@@ -66,9 +67,11 @@ function rapi_keywords_(raw) {
 function rapi_start_(p) {
   const keywords = rapi_keywords_(p.keywords);
   if (!keywords.length) return { ok: false, reason: 'keywords 파라미터가 비어 있습니다.' };
+  const driver = p.driver === 'pump' ? 'pump' : 'trigger';
   return pipeline_startCore_(keywords, {
     force: p.force === '1',
-    until: p.until || 'latex',
+    driver: driver,
+    until: p.until || (driver === 'pump' ? 'latex' : 'done'),
     fig: p.fig !== '0',
     skipExisting: p.skipExisting !== '0'
   });
@@ -133,7 +136,7 @@ function rapi_status_() {
     progress: pl_progress_(st),                 // 패치 13 A-06 (tick 과 같은 객체)
     archived: pl_archivedOk_(st),               // 패치 13 D20
     logTail: rapi_logTail_(RAPI.LOG_TAIL),
-    hasTick: ScriptApp.getProjectTriggers().some(t => t.getHandlerFunction() === PL.TICK_FN),   // 러너 모드에선 false 가 정상
+    hasTick: ScriptApp.getProjectTriggers().some(t => t.getHandlerFunction() === PL.TICK_FN),   // driver=trigger 면 true 가 정상, pump 면 false
     at:      new Date().toISOString(),
   };
 }

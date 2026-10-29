@@ -12,7 +12,8 @@
  *   clear → search → latex → latex_done⏸ → fig → fig_done⏸ → send → normalize → answer → archive → done
  *   · ⏸ 단계에서는 tick 이 {result:'paused'} 를 돌려주고 아무것도 하지 않는다. resume(from) 으로 다음 단계를 고른다.
  *   · opts.until = 'latex'(기본) | 'fig' | 'done'. 'done' 이면 ⏸ 없이 끝까지(메뉴 기본).
- *   · 실행 주체는 맥미니 펌프(tick 연속 호출). 시간 트리거는 만들지 않는다(옛 트리거가 남아 있으면 지운다).
+ *   · opts.driver = 'trigger'(기본: 메뉴·러너 — yield 때마다 1분 뒤 pipeline_tick 트리거로 스스로 이어감, 옛 동작)
+ *                  | 'pump'(맥미니 펌프가 tick 을 연속 호출, 트리거 없음). R1 #1.
  *
  *  상태 PL_STATE (v4 §3.2) — 목록은 개수+앞 20개만, 전체는 Pipeline_Report 시트 (R-03)
  *  정체·공백 (v4 §3.3) — lastTickAt / lastChangeAt / progress
@@ -49,12 +50,15 @@ const PL = {
   REPORT_CELL_MAX: 49000,
   FINISHED: ['done', 'error', 'stopped'],
   PAUSED: ['latex_done', 'fig_done'],
-  RESUME: {                                 // C-17 · D20 전이표
+  RESUME: {                                 // C-17 · D20 · R1 #5 전이표 (error/stopped 는 pl_resumeGuard_ 로 추가 검사)
     latex_done: ['latex', 'fig', 'send'],
     fig_done:   ['fig', 'send'],
-    error:      ['archive'],
-    stopped:    ['archive']
-  }
+    error:      ['latex', 'fig', 'send', 'normalize', 'archive'],
+    stopped:    ['latex', 'fig', 'send', 'normalize', 'archive']
+  },
+  RESUME_AFTER_MS: 60 * 1000,               // driver=trigger 일 때 이어하기 트리거 지연
+  LEGACY_HANDLERS: ['mpr__continueRange', 'mpf__continue', 'mpb__processNextBatchStatus'],   // R1 #3 잔존 트리거
+  LEGACY_PROPS: ['MPR_RANGE_START', 'MPR_RANGE_END', 'MPR_STOP_FLAG', 'MPF_RANGE_START', 'MPF_RANGE_END', 'MPF_STOP_FLAG']
 };
 
 /* =================================================
@@ -96,10 +100,10 @@ function pipeline_start() {
     ui.ButtonSet.YES_NO);
   if (ok !== ui.Button.YES) return;
 
-  const r = pipeline_startCore_(keywords, { force: force, until: 'done', fig: true, skipExisting: true });
+  const r = pipeline_startCore_(keywords, { force: force, until: 'done', fig: true, skipExisting: true, driver: 'trigger' });
   if (!r.ok) { ui.alert('시작 실패', r.reason, ui.ButtonSet.OK); return; }
   const t = pipeline_tick();
-  pl_toast_(`첫 회차 끝: ${t.result} / 단계 ${t.stage}`);
+  pl_toast_(`첫 회차 끝: ${t.result} / 단계 ${t.stage}` + (t.result === 'yield' ? ' — 1분 뒤 자동으로 이어집니다' : ''));
 }
 
 /** 메뉴 '⏭ 이어하기': 멈춘 단계면 다음 단계를 묻고, 아니면 tick 1회 */
@@ -147,9 +151,10 @@ function pl_parseKeywords_(raw) {
   return Array.from(new Set(String(raw || '').split(/[,\n;]+/).map(s => s.trim()).filter(Boolean)));
 }
 
-/** 끝난 런이 보관됐는가 (D20). 변환 결과가 없던 런(latex.ok 0, ds 0)은 보관할 것이 없으니 true */
+/** 끝난 런이 보관됐는가 (D20). 변환 결과가 없던 런(latex.ok 0, ds 0)은 보관할 것이 없으니 true. 옛 스키마(패치 13 이전 런)는 true (R1 s1) */
 function pl_archivedOk_(st) {
   if (!st) return true;
+  if (!st.opts) return true;
   if (st.archive && st.archive.done) return true;
   const hadWork = (st.latex && st.latex.ok > 0) || (st.ds && st.ds.count > 0);
   return !hadWork;
@@ -158,14 +163,15 @@ function pl_archivedOk_(st) {
 /**
  * 파이프라인 시작 코어. 메뉴(`pipeline_start`)와 원격 API(`RemoteApi.gs`)가 공유한다.
  * @param {string[]} keywords
- * @param {Object} opts  force · until('latex'|'fig'|'done', 기본 'latex') · fig(기본 true) · skipExisting(기본 true)
+ * @param {Object} opts  force · driver('trigger' 기본 | 'pump') · until('latex'|'fig'|'done', 기본: trigger→'done', pump→'latex') · fig(기본 true) · skipExisting(기본 true)
  * @return {{ok:boolean, reason?:string, runId?:string, stage?:string}}
  */
 function pipeline_startCore_(keywords, opts) {
   opts = opts || {};
   keywords = (keywords || []).filter(Boolean);
   if (!keywords.length) return { ok: false, reason: '키워드가 비어 있습니다.' };
-  const until = ['latex', 'fig', 'done'].includes(opts.until) ? opts.until : 'latex';
+  const driver = opts.driver === 'pump' ? 'pump' : 'trigger';
+  const until = ['latex', 'fig', 'done'].includes(opts.until) ? opts.until : (driver === 'pump' ? 'latex' : 'done');
 
   const cur = pl_loadState_();
   if (cur && !PL.FINISHED.includes(cur.stage)) {
@@ -177,11 +183,12 @@ function pipeline_startCore_(keywords, opts) {
     return { ok: false, reason: `직전 런(${(cur.keywords || []).join(', ')}, ${cur.stage})이 보관(archive) 전에 끝났습니다 — resume from=archive 로 먼저 보관하거나 force=1` };
   }
   pl_clearTriggers_();
+  pl_clearLegacy_();                                                           // R1 #3: 옛 메뉴 배치 트리거·속성
 
   const now = Date.now();
   const st = {
     stage: 'clear', keywords: keywords, startedAt: new Date(now).toISOString(), runId: '',
-    opts: { until: until, fig: opts.fig !== false, skipExisting: opts.skipExisting !== false },
+    opts: { until: until, fig: opts.fig !== false, skipExisting: opts.skipExisting !== false, driver: driver },
     ticks: 0, lastTickAt: 0, lastChangeAt: now, progress: 0,
     search: { n: {}, skipped: {}, data1Rows: 0 },
     latex: { ok: 0, err: 0, left: 0 },
@@ -194,8 +201,29 @@ function pipeline_startCore_(keywords, opts) {
   };
   st.runId = st.startedAt;
   pl_saveState_(st);
-  pl_log_(st, 'start', `키워드: ${keywords.join(' | ')} / until=${until} fig=${st.opts.fig} skipExisting=${st.opts.skipExisting}`);
+  pl_log_(st, 'start', `키워드: ${keywords.join(' | ')} / driver=${driver} until=${until} fig=${st.opts.fig} skipExisting=${st.opts.skipExisting}`);
   return { ok: true, runId: st.runId, stage: st.stage };
+}
+
+/** R1 #3: 옛 메뉴 배치(_MPR 행범위·_MPF 그림 추출·_MPB)의 잔존 트리거와 범위·중지 속성을 지운다 — 펌프 tick 사이에 끼어들지 못하게 */
+function pl_clearLegacy_() {
+  ScriptApp.getProjectTriggers().forEach(t => {
+    if (PL.LEGACY_HANDLERS.includes(t.getHandlerFunction())) ScriptApp.deleteTrigger(t);
+  });
+  const sp = PropertiesService.getScriptProperties();
+  PL.LEGACY_PROPS.forEach(k => { try { sp.deleteProperty(k); } catch (_) {} });
+}
+
+/** R1 #5: error/stopped 에서의 resume 전제 조건. 통과면 '' 아니면 거부 사유 */
+function pl_resumeGuard_(st, from) {
+  if (!PL.FINISHED.includes(st.stage)) return '';
+  if (from === 'send' && !(st.latex && st.latex.ok > 0)) return 'send 는 Latex 변환 성공 행이 있어야 합니다 (latex.ok 0)';
+  if (from === 'normalize' && !(st.ds && st.ds.writeStart > 0)) return 'normalize 는 send 가 Data_DS 에 쓴 뒤에만 됩니다 (ds.writeStart 0)';
+  if (from === 'fig') {
+    const left = pl_latexTargetRows_(SpreadsheetApp.getActive()).length;
+    if (left > 0) return `fig 는 Latex 대상 행이 0 이어야 합니다 (남은 대상 ${left}행 — resume latex 먼저)`;
+  }
+  return '';
 }
 
 /** 중지 코어 (UI 없음) — 메뉴와 원격 API가 공유 */
@@ -217,6 +245,8 @@ function pipeline_resumeCore_(from) {
   const allowed = PL.RESUME[st.stage];
   if (!allowed) return { ok: false, reason: `단계 ${st.stage} 에서는 resume 할 수 없습니다.` };
   if (!allowed.includes(from)) return { ok: false, reason: `단계 ${st.stage} → ${from} 전이는 허용되지 않습니다 (가능: ${allowed.join(', ')})` };
+  const why = pl_resumeGuard_(st, from);
+  if (why) return { ok: false, reason: why };
   const prev = st.stage;
   st.stage = from;
   st.error = '';
@@ -293,6 +323,11 @@ function pl_runSlice_(budgetMs) {
     }
     pl_saveState_(st);
     if (PL.FINISHED.includes(st.stage) && result !== 'idle') pl_finish_(st);
+    else if (result === 'yield' && st.opts && st.opts.driver === 'trigger') {     // R1 #1: 옛 방식 — 1분 뒤 스스로 이어간다
+      pl_clearTriggers_();
+      ScriptApp.newTrigger(PL.TICK_FN).timeBased().after(PL.RESUME_AFTER_MS).create();
+      pl_log_(st, st.stage, `시간 예산 소진 → ${Math.round(PL.RESUME_AFTER_MS / 1000)}초 뒤 자동 이어하기 (tick #${st.ticks})`);
+    }
     return pl_tickResp_(st, result, t0);
   } finally {
     try { lock.releaseLock(); } catch (_) {}
@@ -468,7 +503,8 @@ function pl_stageSearch_(st, ss, deadline) {
   // C-18: Data_Latex A열 비어있지 않은 행 수 == Data1 기록 행 수
   const src = ss.getSheetByName(PL.SRC_SHEET);
   if (!src) throw new Error(`${PL.SRC_SHEET} 시트를 찾을 수 없습니다.`);
-  const srcRows = pl_countNonEmptyColA_(src);
+  let srcRows = pl_countNonEmptyColA_(src);
+  if (srcRows !== written) { Utilities.sleep(2000); SpreadsheetApp.flush(); srcRows = pl_countNonEmptyColA_(src); }   // R1 s3: 수식 재계산 지연 보험
   if (srcRows !== written) {
     pl_report_(st, 'search.mismatch', 1, `Data_Latex A열 ${srcRows}행 ≠ Data1 ${written}행`);
     throw new Error(`Data_Latex A열 행 수(${srcRows})가 Data1 기록 행 수(${written})와 다릅니다 — 시트 최대 행·A2 수식 확인 (sheetcheck)`);
@@ -618,7 +654,7 @@ function pl_accumNorm_(st, r) {
 
 /** 연도별 아카이브 파일 Latex_arch_<yyyy>. 순서: 상태 ssId → 속성 LATEX_ARCH_SSID_<yyyy> → Drive 이름 검색(중복 생성 방지) → 생성 */
 function pl_archName_(st) {
-  if (!st.archive.year) st.archive.year = Utilities.formatDate(new Date(), 'Asia/Seoul', 'yyyy');
+  if (!st.archive.year) st.archive.year = String(Utilities.formatDate(new Date(), 'Asia/Seoul', 'yyyyMMdd')).slice(0, 4);   // 'yyyy' 단독 패턴 대신 앞 4자리(흉내 환경 호환)
   return PL.ARCH_NAME + st.archive.year;
 }
 
@@ -659,6 +695,7 @@ function pl_stageArchive_(st, ss, deadline) {
     sh = arch.getSheetByName(st.archive.sheet);
     if (!sh) throw new Error('아카이브 시트가 사라졌습니다: ' + st.archive.sheet);
   }
+  if (sh.getMaxRows() < last) sh.insertRowsAfter(sh.getMaxRows(), last - sh.getMaxRows());   // R1 s7
   while (st.archive.cursor <= last) {
     if (Date.now() > deadline - 20000) return 'yield';
     const n = Math.min(PL.ARCH_CHUNK, last - st.archive.cursor + 1);
@@ -694,9 +731,17 @@ function pl_sheetcheck_(keywords) {
     const last = dlds_lastDataRow_(dst, 1);
     out.dataDs.lastRow = last;
     const keys = (last >= 2) ? dst.getRange(2, 1, last - 1, 1).getValues().map(r => nfc_(String(r[0] || '')).toLowerCase()) : [];
-    const ex = {};
-    (keywords || []).forEach(kw => { const k = nfc_(kw).toLowerCase(); ex[kw] = keys.filter(x => x.indexOf(k) !== -1).length; });
+    const ex = {}, emptySol = {};
+    (keywords || []).forEach(kw => {
+      const k = nfc_(kw).toLowerCase();
+      const rows = []; keys.forEach((x, i) => { if (x.indexOf(k) !== -1) rows.push(i + 2); });
+      ex[kw] = rows.length;
+      let empty = 0;                                                        // R1 s11: 그중 C(해설) 빈 행 — 옛 onlyProblem 전송 흔적, skipExisting 으로 영구 제외됨
+      rows.forEach(r => { if (!String(dst.getRange(r, DLDS.DST.solution).getValue() || '').trim()) empty++; });
+      emptySol[kw] = empty;
+    });
     out.dataDs.existingKeys = ex;
+    out.dataDs.emptySolution = emptySol;
     const sample = Math.min(100, Math.max(0, last - 1));
     if (sample > 0) {
       const bc = dst.getRange(last - sample + 1, 2, sample, 2).getValues();
@@ -773,19 +818,21 @@ function pl_summary_(st) {
   const lines = [
     `단계: ${st.stage}`,
     `키워드: ${st.keywords.join(' | ')}`,
-    `시작: ${st.startedAt}   tick: ${st.ticks || 0}회   until=${st.opts ? st.opts.until : '?'}`
+    `시작: ${st.startedAt}   tick: ${st.ticks || 0}회   driver=${st.opts ? st.opts.driver : '(옛 스키마)'} until=${st.opts ? st.opts.until : '?'}`
   ];
   const s = Object.entries((st.search && st.search.n) || {});
   if (s.length) lines.push(`검색: ` + s.map(([k, n]) => `${k}=${n}` + (st.search.skipped[k] ? `(기존 ${st.search.skipped[k]} 제외)` : '')).join(', '));
-  if (st.latex) lines.push(`Latex 변환: 성공 ${st.latex.ok}, 실패 ${st.latex.err}, 남음 ${st.latex.left}`);
+  if (st.latex) lines.push(`Latex 변환: 성공 ${st.latex.ok}, 실패 ${st.latex.err}, 남음 ${st.latex.left || 0}`);
   if (st.fig && (st.fig.done || st.fig.err || st.fig.noPdf)) lines.push(`그림: done ${st.fig.done}, error ${st.fig.err}, no_pdf ${st.fig.noPdf}`);
+  const cnt = v => (v && typeof v === 'object' && !Array.isArray(v)) ? (v.n || 0) : (Array.isArray(v) ? v.length : 0);   // R1 s1: 옛 스키마(배열)도 읽는다
+  const head = v => (v && v.head) ? v.head : (Array.isArray(v) ? v.slice(0, PL.HEAD_N) : []);
   if (st.ds && st.ds.count) lines.push(`Data_DS: ${st.ds.count}행 추가 (행 ${st.ds.writeStart}~${st.ds.writeEnd})` +
-    (st.ds.skippedDup.n ? ` / 기존 ${st.ds.skippedDup.n}건 건너뜀` : '') + (st.ds.incomplete.n ? ` / 불완전 짝 ${st.ds.incomplete.n}건 미전송` : ''));
-  if (st.norm && (st.norm.ok || st.norm.fail)) lines.push(`정규화: 성공 ${st.norm.ok}, 실패 ${st.norm.fail}, 검토 필요 ${st.norm.review.n}` +
-    (Object.keys(st.norm.warn).length ? ` / 경고 ` + Object.entries(st.norm.warn).map(([k, v]) => `${k} ${v}`).join(', ') : ''));
-  if (st.ans && (st.ans.ok || st.ans.miss.n)) lines.push(`정답: 성공 ${st.ans.ok}, 미검출 ${st.ans.miss.n}` +
-    (st.ans.miss.n ? ` (행 ${st.ans.miss.head.join(', ')}${st.ans.miss.n > PL.HEAD_N ? ' …' : ''})` : '') +
-    (st.ans.conflict.n ? `, 유형 불일치 ${st.ans.conflict.n}` : ''));
+    (cnt(st.ds.skippedDup) ? ` / 기존 ${cnt(st.ds.skippedDup)}건 건너뜀` : '') + (cnt(st.ds.incomplete) ? ` / 불완전 짝 ${cnt(st.ds.incomplete)}건 미전송` : ''));
+  if (st.norm && (st.norm.ok || st.norm.fail)) lines.push(`정규화: 성공 ${st.norm.ok}, 실패 ${st.norm.fail}, 검토 필요 ${cnt(st.norm.review)}` +
+    (Object.keys(st.norm.warn || st.norm.warnCount || {}).length ? ` / 경고 ` + Object.entries(st.norm.warn || st.norm.warnCount || {}).map(([k, v]) => `${k} ${v}`).join(', ') : ''));
+  if (st.ans && (st.ans.ok || cnt(st.ans.miss))) lines.push(`정답: 성공 ${st.ans.ok}, 미검출 ${cnt(st.ans.miss)}` +
+    (cnt(st.ans.miss) ? ` (행 ${head(st.ans.miss).join(', ')}${cnt(st.ans.miss) > PL.HEAD_N ? ' …' : ''})` : '') +
+    (cnt(st.ans.conflict) ? `, 유형 불일치 ${cnt(st.ans.conflict)}` : ''));
   if (st.archive && st.archive.done) lines.push(`보관: ${st.archive.sheet}`);
   if (st.error) lines.push(`오류: ${st.error}`);
   lines.push(`전체 목록은 ${PL.REPORT_SHEET} 시트 참고`);
