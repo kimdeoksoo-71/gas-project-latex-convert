@@ -24,8 +24,17 @@
  * 패치 4: 'Latex 변환 : 행범위(자동 이어하기)' 와 Pipeline 은 _MPR 이 OCR 직후 has_diagram 행에 대해
  *   _MPF.processRowSync_ 를 호출해 여기까지 한 번에 처리한다. 이 파일의 메뉴는 no_pdf/error 행 재시도용.
  *
+ * 패치 13 (대량 변환 v4, latex-1.1.0)
+ *   - processBatchBudget_(s, e, deadlineMs, {rate}) : 파이프라인 `fig` 단계용. 트리거·속성을 건드리지 않고
+ *     예산 안에서 "묶음 제출 → 폴링·수집" 을 하고 집계를 돌려준다. 묶음 크기·폴링 간격은 Mathpix 분당 한도(rate)에서
+ *     chunk/interval ≤ 0.6×rate 가 되도록 계산한다 (P-13: Latex_CVT 키는 50/분).
+ *   - no_pdf 는 종결 상태 (R-13). 재시도는 L열을 비운 뒤.
+ *   - 제출 루프는 I·J·K·L 만 읽고(C-06b), 폴링은 K:L 만 읽는다(P-11). 완료 행만 전체를 읽는다.
+ *   - C열 교체 뒤 mpr_lintRow 로 P열 재검사 (C-03). POLL_MS 10초 (P-08). 메뉴는 파이프라인 진행 중 거부 (E-05).
+ *
  * 스크립트 속성 (선택)
  *   MPF_FIG_FOLDER_PATH : 그림 저장 폴더 경로 (기본 PBMAI/IMAGE_FIG, 없으면 만듦)
+ *   PL_MPX_RATE_PER_MIN : Mathpix 분당 요청 한도 (기본 50)
  *
  * MainMenu.gs 의 'Latex 변환' 서브메뉴에 추가:
  *   .addItem('🖼 그림 추출 : 행범위 (has_diagram 행만)', 'mpf_runRange')
@@ -46,8 +55,11 @@ const _MPF = (function () {
     HANDLER: 'mpf__continue',
     TIME_BUDGET_MS: 5 * 60 * 1000,
     SAFETY_GAP_MS: 40 * 1000,
-    POLL_MS: 6000,                 // submitted 행 상태 확인 간격
+    POLL_MS: 10000,                // submitted 행 상태 확인 간격 (패치 13 P-08: 6→10초)
     SUBMIT_GAP_MS: 400,
+    RATE_DEFAULT: 50,              // 패치 13 P-13: Mathpix 분당 한도 기본값 (Latex_CVT)
+    RATE_SHARE: 0.6,               //   폴링 요청이 한도의 이 비율을 넘지 않게
+    CHUNK_MIN: 5, CHUNK_MAX: 50,
     API: 'https://api.mathpix.com/v3/pdf',
     FIG_TAG: name => '\\includegraphics{' + name + '}',   // mmd 의 이미지 링크를 이렇게 치환
     // v3/pdf 옵션 (문서에 있는 것만)
@@ -302,9 +314,10 @@ const _MPF = (function () {
     return true;
   }
 
-  /** 수집 단계: 'done' | 'pending' | 'error' */
-  function collectRow_(sh, row, creds, vals, folder) {
-    const pdfId = String(vals[CFG.COLS.pdf_id - 1] || '').trim();
+  /** 수집 단계: 'done' | 'pending' | 'error'
+   *  패치 13: vals 대신 함수를 주면(완료 확인 뒤에만) 행 전체를 읽는다 — 폴링 때 긴 열을 매번 읽지 않도록 */
+  function collectRow_(sh, row, creds, valsOrFn, folder) {
+    const pdfId = String((typeof valsOrFn === 'function' ? sh.getRange(row, CFG.COLS.pdf_id).getValue() : valsOrFn[CFG.COLS.pdf_id - 1]) || '').trim();
     if (!pdfId) { writeStatus_(sh, row, 'error: pdf_id 없음'); return 'error'; }
     const st = getStatus_(creds, pdfId);
     if (st.status === 'error') {
@@ -314,6 +327,7 @@ const _MPF = (function () {
     if (st.status !== 'completed') return 'pending';
     const mmd = getMmd_(creds, pdfId);
     if (mmd === null) return 'pending';
+    const vals = (typeof valsOrFn === 'function') ? valsOrFn() : valsOrFn;
 
     const stem = stemOf_(vals[CFG.COLS.filename - 1]);
     const r = collectFigures_(mmd, stem, folder);
@@ -327,7 +341,10 @@ const _MPF = (function () {
       r.links.join('\n'),
       r.mmd
     ]]);
-    if (CFG.INTO_LATEX && r.names.length > 0) applyIntoLatex_(sh, row, r.mmd);
+    if (CFG.INTO_LATEX && r.names.length > 0) {
+      applyIntoLatex_(sh, row, r.mmd);
+      if (typeof mpr_lintRow === 'function') mpr_lintRow(sh, row);      // 패치 13 C-03: 교체본 재검사
+    }
     return 'done';
   }
 
@@ -401,8 +418,9 @@ const _MPF = (function () {
         const status = String(vals[CFG.COLS.fig_status - 1] || '').trim();
         if (status.startsWith('done')) { done++; continue; }
         if (status.startsWith('error')) { errors++; continue; }        // L 을 지우면 재시도
+        if (status === 'no_pdf') { errors++; continue; }               // 패치 13 R-13: no_pdf 도 종결 (L 을 지우면 재시도)
         if (status === 'submitted') { submitted++; continue; }
-        // '' 또는 no_pdf
+        // ''
         if (Date.now() > deadline) { unsubmitted++; continue; }
         try {
           if (submitRow_(sh, row, creds, vals)) submitted++;
@@ -442,6 +460,91 @@ const _MPF = (function () {
     } finally {
       try { lock.releaseLock(); } catch (_) {}
     }
+  }
+
+  /** ===== 패치 13: 파이프라인 `fig` 단계용 예산형 일괄 처리 =====
+   *  반환 { done, err, noPdf, submitted(지금 pending), left(미제출), submittedNow, requests, noPdfRows[], errRows[] }
+   *  - 트리거·속성(PROP_START/END/STOP)·toast 를 건드리지 않는다.
+   *  - 분당 한도 rate 로 chunk·interval 을 정한다: chunk = clamp(round(rate×0.4), 5, 50), interval = ceil(chunk/(0.6×rate)×60)초,
+   *    rate 50 → chunk 20·간격 40초 / rate 200 → chunk 50·간격 25초.
+   *  - 요청(제출·상태 GET)은 한꺼번에 쏘지 않고 gapMs = 60000/(0.6×rate) 간격으로 고르게 낸다 → 어떤 60초 창에서도 0.6×rate 이하.
+   *    (상태 GET 을 묶음으로 쏘고 interval 만 쉬면 60초 창에 두 묶음이 겹쳐 한도를 넘는다 — 흉내 시험에서 확인)
+   */
+  function rateParams_(rate) {
+    rate = Number(rate) > 0 ? Number(rate) : CFG.RATE_DEFAULT;
+    const chunk = Math.max(CFG.CHUNK_MIN, Math.min(CFG.CHUNK_MAX, Math.round(rate * 0.4)));
+    const gapMs = Math.max(CFG.SUBMIT_GAP_MS, Math.ceil(60000 / (CFG.RATE_SHARE * rate)));
+    const intervalMs = Math.max(CFG.POLL_MS, chunk * gapMs);
+    return { rate, chunk, intervalMs, submitGapMs: gapMs, pollGapMs: gapMs };
+  }
+
+  function processBatchBudget_(s, e, deadlineMs, opts) {
+    opts = opts || {};
+    const sh = getSheet_();
+    if (!sh) throw new Error(`시트 "${CFG.SHEET_NAME}" 없음`);
+    ensureHeader_(sh);
+    const rp = rateParams_(opts.rate);
+    const creds = getCreds_();
+    const folder = figFolder_();
+    const n = e - s + 1;
+    const out = { done: 0, err: 0, noPdf: 0, submitted: 0, left: 0, submittedNow: 0, requests: 0, noPdfRows: [], errRows: [], chunk: rp.chunk, intervalMs: rp.intervalMs };
+    if (n <= 0) return out;
+    const readRow = row => sh.getRange(row, 1, 1, CFG.COLS.latex_fig).getValues()[0];
+
+    // 1) 분류 — I·J·K·L 만 읽는다 (C-06b)
+    const ijkl = sh.getRange(s, CFG.COLS.has_diagram, n, 4).getValues();
+    const pending = [], unsub = [];
+    for (let i = 0; i < n; i++) {
+      if (ijkl[i][0] !== true) continue;
+      const row = s + i;
+      const status = String(ijkl[i][3] || '').trim();
+      if (status.startsWith('done')) out.done++;
+      else if (status.startsWith('error')) { out.err++; out.errRows.push(row); }
+      else if (status === 'no_pdf') { out.noPdf++; out.noPdfRows.push(row); }          // R-13 종결
+      else if (status === 'submitted') pending.push(row);
+      else unsub.push(row);
+    }
+
+    // 2) 제출 — pending 이 chunk 미만이면 채운다
+    while (unsub.length && pending.length < rp.chunk && Date.now() + 15000 < deadlineMs) {
+      const row = unsub.shift();
+      try {
+        out.requests++;
+        if (submitRow_(sh, row, creds, readRow(row))) { pending.push(row); out.submittedNow++; }
+        else { out.noPdf++; out.noPdfRows.push(row); }
+      } catch (err) {
+        writeStatus_(sh, row, 'error: ' + String(err).slice(0, 300)); out.err++; out.errRows.push(row);
+      }
+      Utilities.sleep(rp.submitGapMs);
+    }
+
+    // 3) 폴링·수집 — 상태 GET 을 pollGapMs 간격으로 고르게(P-13); 완료 행만 전체 읽기 (P-11)
+    //    (폴링은 행별 상태 GET 이므로 K:L 재읽기도 없다)
+    while (pending.length && Date.now() < deadlineMs) {
+      const still = [];
+      for (const row of pending) {
+        if (Date.now() + rp.pollGapMs > deadlineMs) { still.push(row); continue; }
+        try {
+          out.requests++;
+          const r = collectRow_(sh, row, creds, () => readRow(row), folder);
+          if (r === 'pending') still.push(row);
+          else if (r === 'done') out.done++;
+          else { out.err++; out.errRows.push(row); }
+        } catch (err) {
+          writeStatus_(sh, row, 'error: ' + String(err).slice(0, 300)); out.err++; out.errRows.push(row);
+        }
+        Utilities.sleep(rp.pollGapMs);
+      }
+      pending.length = 0; pending.push.apply(pending, still);
+      // 한 바퀴가 interval 보다 빨리 끝났으면(pending 이 적을 때) 나머지를 쉰다
+      const roundMs = pending.length * rp.pollGapMs;
+      if (pending.length && roundMs < rp.intervalMs) {
+        if (Date.now() + (rp.intervalMs - roundMs) < deadlineMs) Utilities.sleep(rp.intervalMs - roundMs); else break;
+      }
+    }
+    out.submitted = pending.length;
+    out.left = unsub.length;
+    return out;
   }
 
   function finish_(sp, msg) {
@@ -503,6 +606,7 @@ const _MPF = (function () {
   // ===== 메뉴 진입 =====
   function runRange_() {
     const ui = SpreadsheetApp.getUi();
+    if (typeof pl_isBusy_ === 'function' && pl_isBusy_()) { ui.alert(pl_busyMessage_()); return; }   // 패치 13 E-05
     const sh = getSheet_();
     if (!sh) { ui.alert(`시트 "${CFG.SHEET_NAME}" 없음`); return; }
     ensureHeader_(sh);
@@ -539,11 +643,12 @@ const _MPF = (function () {
     try { SpreadsheetApp.getUi().alert('그림 추출을 중지했습니다. (submitted 상태인 행은 다음 실행 때 이어서 수집됩니다)'); } catch (_) {}
   }
 
-  return { CFG, COLS: CFG.COLS, runRange_, stop_, processBatch_, processRowSync_, parseImageLinks_, collectFigures_, mergeHeader_, repairHeaders_ };
+  return { CFG, COLS: CFG.COLS, runRange_, stop_, processBatch_, processBatchBudget_, rateParams_, processRowSync_, parseImageLinks_, collectFigures_, mergeHeader_, repairHeaders_ };
 })();
 
 /** ===== 전역 래퍼 (메뉴/트리거용) ===== */
 function mpf_runRange()  { _MPF.runRange_(); }
 function mpf_stop()      { _MPF.stop_(); }
 function mpf__continue() { _MPF.processBatch_(); }   // 트리거가 호출
+function mpf_processBatchBudget(s, e, deadlineMs, opts) { return _MPF.processBatchBudget_(s, e, deadlineMs, opts); }   // 패치 13 파이프라인용
 function mpf_repairHeaders() { _MPF.repairHeaders_(); }  // 패치 5 복구 (메뉴)

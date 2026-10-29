@@ -51,8 +51,8 @@ const DLDS = {
   TAG_PROBLEM:  '_문제',
   TAG_SOLUTION: '_해설',
 
-  // status 가 'done'이 아닌 행도 보낼지 (false면 done만)
-  SEND_ONLY_DONE: false,
+  // status 가 'done'이 아닌 행도 보낼지 (false면 done만). 패치 13(D5): 대량 변환 동안 true
+  SEND_ONLY_DONE: true,
 
   // "(2)" 괄호숫자를 원문자 ②로 인정 (Mathpix가 원문자를 (n)으로 뽑는 경우)
   ACCEPT_PAREN_AS_CIRCLED: true,
@@ -71,6 +71,7 @@ const DLDS_KW_ONLY_RE = /^[\[【(]?\s*(?:정답|답)\s*[\]】)]?\s*[:：|｜]?\s
  * ================================================= */
 function dl_sendPairsToDataDS() {
   const ui = SpreadsheetApp.getUi();
+  if (typeof pl_isBusy_ === 'function' && pl_isBusy_()) { ui.alert(pl_busyMessage_()); return; }   // 패치 13 E-05
   const ss = SpreadsheetApp.getActive();
   const src = ss.getSheetByName(DLDS.SRC_SHEET);
   const dst = ss.getSheetByName(DLDS.DST_SHEET);
@@ -130,10 +131,10 @@ function dl_sendPairsToDataDS() {
 
   // 3) 이미 Data_DS에 있는 key는 건너뜀
   const existing = new Set();
-  const dstLast = dlds_lastDataRow_(dst, 3);
+  const dstLast = dlds_lastDataRow_(dst, 1);                      // 패치 13 C-06c: A열만으로 판정
   if (dstLast >= 2) {
     dst.getRange(2, DLDS.DST.key, dstLast - 1, 1).getValues()
-      .forEach(r => { const k = String(r[0] || '').trim(); if (k) existing.add(k); });
+      .forEach(r => { const k = nfc_(String(r[0] || '')).trim(); if (k) existing.add(k); });   // 패치 13 C-01: NFC
   }
 
   const out = [];       // [key, problem, solution]
@@ -141,7 +142,7 @@ function dl_sendPairsToDataDS() {
   Array.from(pairs.entries())
     .sort((a, b) => a[1].order - b[1].order)
     .forEach(([key, p]) => {
-      if (existing.has(key)) { skippedDup.push(key); return; }
+      if (existing.has(nfc_(key))) { skippedDup.push(key); return; }
       if (p.problem === null && p.solution !== null) { onlySolution.push(key); return; } // 해설만 있으면 보내지 않음
       if (p.solution === null) onlyProblem.push(key);
       out.push([key, p.problem || '', p.solution || '']);

@@ -15,7 +15,7 @@
  */
 
 const RAPI = {
-  VERSION:    'latex-1.0.2',
+  VERSION:    'latex-1.1.0',   // 패치 13 (대량 변환 v4): tick / resume / sheetcheck 추가, start 는 트리거를 걸지 않는다
   PROJECT:    'latex-convert',
   TOKEN_PROP: 'REMOTE_TOKEN',
   LOG_TAIL:   20,
@@ -29,8 +29,11 @@ function doGet(e) {
     switch (p.cmd) {
       case 'ping':   return rapi_json_(rapi_ping_());
       case 'start':  return rapi_json_(rapi_start_(p));
+      case 'tick':   return rapi_json_(pl_runSlice_(pl_budget_()));
+      case 'resume': return rapi_json_(pipeline_resumeCore_(String(p.from || '').trim()));
       case 'status': return rapi_json_(rapi_status_());
       case 'stop':   return rapi_json_(pipeline_stopCore_('원격 중지 (RemoteApi)'));
+      case 'sheetcheck': return rapi_json_(Object.assign({ ok: true }, pl_sheetcheck_(rapi_keywords_(p.keywords))));
       case 'imagecheck': return rapi_json_(rapi_imagecheck_(p));
       default:       return rapi_json_({ ok: false, reason: 'unknown cmd: ' + p.cmd });
     }
@@ -44,9 +47,12 @@ function rapi_ping_() {
 }
 
 /**
- * 변환 시작.
- *   keywords : 쉼표/줄바꿈 구분 (필수)
- *   force    : 1이면 진행 중인 파이프라인을 중단하고 새로 시작
+ * 변환 시작 (패치 13: 상태만 만든다. 진행은 tick).
+ *   keywords     : 쉼표/줄바꿈 구분 (필수, 대량 변환은 1개)
+ *   force        : 1이면 진행 중인 파이프라인을 중단하고 새로 시작 (미보관 런도 덮어씀)
+ *   until        : latex(기본) | fig | done
+ *   fig          : 0이면 그림 단계 없이 send 로 (기본 1)
+ *   skipExisting : 0이면 Data_DS 기존 key 도 변환 (기본 1)
  *
  * ⚠️ audition과 달리 키워드를 NFC 정규화하지 않는다 — 이 프로젝트의
  *    `pipeline_start`가 원래 그렇게 동작했고, 동작을 바꾸지 않기 위함이다.
@@ -60,7 +66,12 @@ function rapi_keywords_(raw) {
 function rapi_start_(p) {
   const keywords = rapi_keywords_(p.keywords);
   if (!keywords.length) return { ok: false, reason: 'keywords 파라미터가 비어 있습니다.' };
-  return pipeline_startCore_(keywords, { force: p.force === '1', deferTick: true });
+  return pipeline_startCore_(keywords, {
+    force: p.force === '1',
+    until: p.until || 'latex',
+    fig: p.fig !== '0',
+    skipExisting: p.skipExisting !== '0'
+  });
 }
 
 /**
@@ -84,6 +95,7 @@ function rapi_imagecheck_(p) {
   const ITEM_RE = /_(문제|해설)_(.+?)(?:_c\d+)?\.(png|pdf)$/i;
   const seen = {}, dupSamples = [];
   let duplicates = 0, scanned = 0, newest = 0;
+  const t0 = Date.now();
   const files = folder.getFiles();
   while (files.hasNext()) {
     const f = files.next();
@@ -108,17 +120,20 @@ function rapi_imagecheck_(p) {
   });
   return { ok: true, folderId: folder.getId(), scanned: scanned,
            newestCreated: newest ? new Date(newest).toISOString() : null, now: new Date().toISOString(),
-           byKeyword: byKeyword, duplicates: duplicates, dupSamples: dupSamples };
+           byKeyword: byKeyword, duplicates: duplicates, dupSamples: dupSamples, elapsedMs: Date.now() - t0 };
 }
 
 /** 상태 조회 — 러너가 폴링해 정체를 판정한다(§7). 원본을 가공 없이 싣는다. */
 function rapi_status_() {
+  const st = pl_loadState_() || null;
   return {
     ok: true,
     version: RAPI.VERSION,
-    state:   pl_loadState_() || null,
+    state:   st,
+    progress: pl_progress_(st),                 // 패치 13 A-06 (tick 과 같은 객체)
+    archived: pl_archivedOk_(st),               // 패치 13 D20
     logTail: rapi_logTail_(RAPI.LOG_TAIL),
-    hasTick: ScriptApp.getProjectTriggers().some(t => t.getHandlerFunction() === PL.TICK_FN),
+    hasTick: ScriptApp.getProjectTriggers().some(t => t.getHandlerFunction() === PL.TICK_FN),   // 러너 모드에선 false 가 정상
     at:      new Date().toISOString(),
   };
 }

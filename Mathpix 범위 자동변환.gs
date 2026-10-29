@@ -26,6 +26,13 @@
  * - _MPF.CFG.INTO_LATEX=true(기본) 이면 그림이 1개 이상 저장된 행은 C열(latex)을 O열(latex_fig,
  *   \includegraphics 포함)로 바꾸고, 원래 v3/text 결과는 D열(text)에 보관한다.
  *
+ * [패치 13 · 대량 변환 v4 — latex-1.1.0]
+ * - writeSuccess_ 를 C~J 1회 setValues + P 1회로 묶음 (P-03), 셀 5만 자 잘라 쓰기 (S-02)
+ * - convertRows_(rows, deadline, {fig:false}) 로 파이프라인 OCR 패스는 그림 동기 대기를 하지 않는다 (P-01)
+ * - mpr_lintRow(sh,row) 전역 노출 — 그림 단계가 C열 교체 뒤 P열을 다시 검사 (C-03)
+ * - blob > 1.4MB 면 image_too_large 로 즉시 포기(attempts=MAX) (P-05)
+ * - 메뉴 '행범위 변환'은 파이프라인 진행 중이면 거부 (E-05)
+ *
  * [패치 10 · LaTeX 정합성 검사]
  * - 변환 직후 결과 LaTeX 의 괄호·구분자 정합성을 검사해 P열 latex_warn 에 기록한다.
  *   검사 항목:
@@ -57,8 +64,17 @@ const _MPR = (function () {
     HANDLER: 'mpr__continueRange',       // 트리거 핸들러 이름
     TIME_BUDGET_MS: 5 * 60 * 1000,       // 5분 예산
     SAFETY_GAP_MS: 40 * 1000,            // 40초 여유
-    MAX_ATTEMPTS: 3
+    MAX_ATTEMPTS: 3,
+    CELL_MAX: 49999,                     // 패치 13: 셀 5만 자 한도
+    BLOB_MAX: Math.round(1.4 * 1024 * 1024)   // 패치 13: base64 2MB 한도 대비 원본 상한
   };
+
+  /** 패치 13: 셀 한도 초과분 잘라 쓰기 (Splitutils.gs safeCellWrite_ 와 같은 규칙) */
+  function clip_(text) {
+    text = String(text == null ? '' : text);
+    if (text.length <= CFG.CELL_MAX) return text;
+    return text.slice(0, CFG.CELL_MAX - 100) + '\n\n… [총 ' + text.length.toLocaleString() + '자 중 셀 한도 초과로 잘림]';
+  }
 
   function getSheet_() {
     return SpreadsheetApp.getActive().getSheetByName(CFG.SHEET_NAME);
@@ -100,7 +116,11 @@ const _MPR = (function () {
 
   /** 패치 10: 현재 C열 내용을 검사해 P열에 기록 (경고면 붉은 배경) */
   function writeLint_(sh, row) {
-    const warn = lintLatex_(sh.getRange(row, CFG.COLS.latex).getValue());
+    return writeLintText_(sh, row, sh.getRange(row, CFG.COLS.latex).getValue());
+  }
+  /** 패치 13: 메모리의 본문으로 검사 (셀 재읽기 없음) */
+  function writeLintText_(sh, row, text) {
+    const warn = lintLatex_(text);
     const cell = sh.getRange(row, CFG.COLS.latex_warn);
     cell.setValue(warn);
     cell.setBackground(warn ? CFG.WARN_BG : null);
@@ -121,11 +141,13 @@ const _MPR = (function () {
     return m[0];
   }
 
-  /** Drive 파일 → data URL */
+  /** Drive 파일 → data URL. 패치 13: 1.4MB 초과는 image_too_large (호출자가 attempts=MAX 로 포기) */
   function driveFileToDataUrl_(linkOrId) {
     const fileId = extractFileId_(linkOrId);
     const blob = DriveApp.getFileById(fileId).getBlob();
-    return 'data:' + blob.getContentType() + ';base64,' + Utilities.base64Encode(blob.getBytes());
+    const bytes = blob.getBytes();
+    if (bytes.length > CFG.BLOB_MAX) throw new Error('image_too_large:' + bytes.length);
+    return 'data:' + blob.getContentType() + ';base64,' + Utilities.base64Encode(bytes);
   }
 
   /** Mathpix v3/text 요청 본문 (한 곳에서만 관리) */
@@ -207,17 +229,16 @@ const _MPR = (function () {
     return String(s || '').split(/[\n|]+/).map(t => t.trim()).filter(Boolean);
   }
  
-  /** OCR 성공 결과를 행에 기록 (latex + diagram 정보). status 는 호출자가 정한다.
-   *  패치 7: (text, dg) 를 직접 받는다 — 조각 병합본을 기록할 수 있도록. */
-  function writeSuccess_(sh, row, text, dg) {
-    sh.getRange(row, CFG.COLS.latex).setValue(text || '');
-    sh.getRange(row, CFG.COLS.last_error).setValue('');
-    sh.getRange(row, CFG.COLS.processed_at).setValue(new Date());
-    sh.getRange(row, CFG.COLS.has_diagram, 1, 2).setValues([[
-      dg.n > 0,
-      dg.n > 0 ? JSON.stringify(dg) : ''
+  /** OCR 성공 결과를 행에 기록 (latex + diagram 정보).
+   *  패치 7: (text, dg) 를 직접 받는다 — 조각 병합본을 기록할 수 있도록.
+   *  패치 13: C~J 1회 setValues (status·attempts 포함) + P 1회. D(text) 는 비운다(그림 단계가 원본 보관용으로 다시 쓴다). */
+  function writeSuccess_(sh, row, text, dg, status, attempts) {
+    const latex = clip_(text || '');
+    sh.getRange(row, CFG.COLS.latex, 1, 8).setValues([[
+      latex, '', status, attempts, '', new Date(),
+      dg.n > 0, dg.n > 0 ? JSON.stringify(dg) : ''
     ]]);
-    writeLint_(sh, row);                                   // 패치 10
+    writeLintText_(sh, row, latex);                        // 패치 10·13
     return dg;
   }
  
@@ -257,11 +278,11 @@ const _MPR = (function () {
    *  status 가 fig_pending 이면 OCR 은 건너뛰고 그림 수집만 이어서 한다.
    *  패치 7: drive_link 에 조각 링크가 여러 개면 조각별로 OCR 해 순서대로 이어붙인다.
    */
-  function convertOneRow_(sh, row, creds, attempts, linkOrId, deadlineMs, status) {
+  function convertOneRow_(sh, row, creds, attempts, linkOrId, deadlineMs, status, figOn) {
     const resume = status === 'fig_pending';
+    const figWanted = (figOn !== false) && figAvailable_();
     if (!resume) {
-      sh.getRange(row, CFG.COLS.attempts).setValue(attempts + 1);
-      sh.getRange(row, CFG.COLS.status).setValue('in_progress');
+      sh.getRange(row, CFG.COLS.status, 1, 2).setValues([['in_progress', attempts + 1]]);   // 강제 종료 대비 선기록 (C-11)
  
       const links = splitLinks_(linkOrId);
       if (!links.length) {
@@ -282,13 +303,10 @@ const _MPR = (function () {
         if (i < links.length - 1) Utilities.sleep(150);
       }
       const dg = (links.length === 1) ? multi.pieces[0] : multi;
-      writeSuccess_(sh, row, texts.filter(function (t) { return t; }).join('\n\n'), dg);
- 
-      if (!(dg.n > 0 && figAvailable_())) {
-        sh.getRange(row, CFG.COLS.status).setValue('done');
-        return 'done';
-      }
-    } else if (!figAvailable_()) {
+      const toFig = dg.n > 0 && figWanted;
+      writeSuccess_(sh, row, texts.filter(function (t) { return t; }).join('\n\n'), dg, toFig ? 'in_progress' : 'done', attempts + 1);
+      if (!toFig) return 'done';
+    } else if (!figWanted) {
       sh.getRange(row, CFG.COLS.status).setValue('done');   // 그림 기능이 꺼졌으면 그대로 마감
       return 'done';
     }
@@ -309,6 +327,7 @@ const _MPR = (function () {
   /** ===== 시작: 범위 입력 후 첫 배치 실행 ===== */
   function start_() {
     const ui = SpreadsheetApp.getUi();
+    if (typeof pl_isBusy_ === 'function' && pl_isBusy_()) { ui.alert(pl_busyMessage_()); return; }   // 패치 13 E-05
     const sh = getSheet_();
     if (!sh) { ui.alert(`시트 "${CFG.SHEET_NAME}" 없음`); return; }
 
@@ -404,7 +423,8 @@ const _MPR = (function () {
    *  반환: { attempted, ok, err, stoppedByTime, withDiagram, figPending }
    *  - fig_pending 행이 남으면 stoppedByTime=true 로 돌려 Pipeline 이 'yield' 하고 다음 회차에 다시 넘겨주게 한다.
    */
-  function convertRows_(rows, deadlineMs) {
+  function convertRows_(rows, deadlineMs, opts) {
+    const figOn = !(opts && opts.fig === false);
     const sh = getSheet_();
     if (!sh) throw new Error(`시트 "${CFG.SHEET_NAME}" 없음`);
     ensureDiagramHeader_(sh);
@@ -415,13 +435,13 @@ const _MPR = (function () {
       if (Date.now() > deadlineMs) { out.stoppedByTime = true; break; }
       out.attempted++;
 
-      const vals = sh.getRange(row, 1, 1, 8).getValues()[0];
+      const vals = sh.getRange(row, 1, 1, 6).getValues()[0];          // A~F (C·D 는 쓰지 않지만 한 행이라 비용 미미)
       const attempts = Number(vals[CFG.COLS.attempts - 1] || 0);
       const linkOrId = String(vals[CFG.COLS.drive_link - 1] || '').trim();
       const status = String(vals[CFG.COLS.status - 1] || '').trim();
 
       try {
-        const r = convertOneRow_(sh, row, creds, attempts, linkOrId, deadlineMs, status);
+        const r = convertOneRow_(sh, row, creds, attempts, linkOrId, deadlineMs, status, figOn);
         if (r === 'done') {
           out.ok++;
           if (sh.getRange(row, CFG.COLS.has_diagram).getValue() === true) out.withDiagram++;
@@ -433,10 +453,24 @@ const _MPR = (function () {
         }
       } catch (err) {
         writeError_(sh, row, err);
+        if (/^Error: image_too_large|^image_too_large/.test(String(err))) sh.getRange(row, CFG.COLS.attempts).setValue(CFG.MAX_ATTEMPTS);   // 패치 13 P-05
         out.err++;
       }
       Utilities.sleep(200);
     }
+    return out;
+  }
+
+  /** 패치 13: status='error' 인 행 번호 (A열 + E:F 만 읽음) */
+  function errorRows_() {
+    const sh = getSheet_();
+    if (!sh) return [];
+    const last = sh.getLastRow();
+    if (last < 2) return [];
+    const a = sh.getRange(2, 1, last - 1, 1).getValues();
+    const e = sh.getRange(2, CFG.COLS.status, last - 1, 1).getValues();
+    const out = [];
+    a.forEach((r, i) => { if (String(r[0] || '').trim() && String(e[i][0] || '').trim() === 'error') out.push(i + 2); });
     return out;
   }
 
@@ -485,12 +519,14 @@ const _MPR = (function () {
     try { SpreadsheetApp.getUi().alert('자동변환을 중지했습니다.'); } catch (_) {}
   }
 
-  return { start_, stop_, processBatch_, convertRows_, debugLineData_ };
+  return { start_, stop_, processBatch_, convertRows_, debugLineData_, writeLint_, errorRows_ };
 })();
 
 /** ===== 전역 래퍼 (메뉴/트리거용) ===== */
 function mpr_runRangeAuto() { _MPR.start_(); }
 function mpr_stopAuto()     { _MPR.stop_(); }
 function mpr__continueRange() { _MPR.processBatch_(); } // 트리거가 호출
-function mpr_convertRows(rows, deadlineMs) { return _MPR.convertRows_(rows, deadlineMs); } // 파이프라인용
+function mpr_convertRows(rows, deadlineMs, opts) { return _MPR.convertRows_(rows, deadlineMs, opts); } // 파이프라인용 (opts.fig=false 면 OCR 만)
+function mpr_lintRow(sh, row) { return _MPR.writeLint_(sh, row); }   // 패치 13 C-03: 그림 교체 뒤 P열 재검사
+function mpr_errorRows() { return _MPR.errorRows_(); }               // 패치 13: error 행 목록
 function mpr_debugLineData() { _MPR.debugLineData_(); } // 패치 1 확인용 (메뉴에 추가하거나 편집기에서 직접 실행)
