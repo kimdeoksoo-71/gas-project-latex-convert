@@ -16,6 +16,8 @@ function onOpen() {
   mainMenu.addItem('📋 파이프라인 상태', 'pipeline_status');
   mainMenu.addItem('🔍 시트 점검 (최대 행·A2 수식·Data_DS 기존 key)', 'pipeline_sheetcheck_menu');   // 패치 13
   mainMenu.addSeparator();
+  mainMenu.addItem('🔗 문항장부 ID 채우기 (Data_DS L열)', 'jb_backfillFromLedger');   // Phase 72 (JangbuId.gs)
+  mainMenu.addSeparator();
 
   // 5. 서브메뉴 A
   const subMenuA = ui.createMenu('Latex 변환')
