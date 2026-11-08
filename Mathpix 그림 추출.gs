@@ -243,10 +243,14 @@ const _MPF = (function () {
     const names = [], urls = [];
     let text = mmd;
     links.forEach((L, i) => {
-      const res = fetchWithRetry_(L.url, { method: 'get', muteHttpExceptions: true });
-      if (res.getResponseCode() !== 200) throw new Error('그림 다운로드 실패 ' + res.getResponseCode() + ': ' + L.url);
+      // 패치 14 (2026-11-08, 25모의X02·X13 해설_4미적30 실측): tabular(증감표) 안의 그림 링크는 Mathpix mmd가 URL의 & 를 \& 로
+      //   이스케이프해 UrlFetchApp 이 "잘못된 인수"를 던지고, 그 행의 나머지 그림(실제 그래프)까지 통째로 잃었다.
+      //   내려받을 때만 \& → & 로 되돌리고, 본문 치환은 원문(이스케이프된 URL) 그대로 맞춘다.
+      const fetchUrl = L.url.replace(/\\&/g, '&');
+      const res = fetchWithRetry_(fetchUrl, { method: 'get', muteHttpExceptions: true });
+      if (res.getResponseCode() !== 200) throw new Error('그림 다운로드 실패 ' + res.getResponseCode() + ': ' + fetchUrl);
       const blob = res.getBlob();
-      const name = `${stem}_fig${i + 1}.${extFromUrl_(L.url, blob.getContentType())}`;
+      const name = `${stem}_fig${i + 1}.${extFromUrl_(fetchUrl, blob.getContentType())}`;
       const f = saveBlob_(folder, name, blob);
       names.push(name);
       urls.push(f.getUrl());
