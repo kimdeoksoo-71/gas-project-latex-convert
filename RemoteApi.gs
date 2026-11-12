@@ -15,8 +15,8 @@
  */
 
 const RAPI = {
-  VERSION:    'latex-1.1.1',   // 패치 14: 그림 URL \& 복원(2026-11-08) · 패치 13 (대량 변환 v4): tick / resume / sheetcheck 추가, start 는 트리거를 걸지 않는다
-  PROJECT:    'latex-convert',
+  VERSION:    'latex-kice-1.0.0',   // KICE 사본(계획서 v5 §6-4): 원본 latex-1.1.1 + ①입력 폴더 속성 ②PDF 전체검색 끔 ③problemOnly ④아카이브 접두. 이하 원본 이력 — 패치 14: 그림 URL \& 복원(2026-11-08) · 패치 13 (대량 변환 v4): tick / resume / sheetcheck 추가, start 는 트리거를 걸지 않는다
+  PROJECT:    'latex-convert-kice',
   TOKEN_PROP: 'REMOTE_TOKEN',
   LOG_TAIL:   20,
 };
@@ -54,6 +54,7 @@ function rapi_ping_() {
  *   until        : latex | fig | done (기본: trigger→done, pump→latex)
  *   fig          : 0이면 그림 단계 없이 send 로 (기본 1)
  *   skipExisting : 0이면 Data_DS 기존 key 도 변환 (기본 1)
+ *   problemOnly  : 1이면 해설 없는 문항도 문제만 Data_DS 로 보낸다(C 비움). 평가원 시험지용 [KICE 사본 ③] (기본 0)
  *
  * ⚠️ audition과 달리 키워드를 NFC 정규화하지 않는다 — 이 프로젝트의
  *    `pipeline_start`가 원래 그렇게 동작했고, 동작을 바꾸지 않기 위함이다.
@@ -73,7 +74,8 @@ function rapi_start_(p) {
     driver: driver,
     until: p.until || (driver === 'pump' ? 'latex' : 'done'),
     fig: p.fig !== '0',
-    skipExisting: p.skipExisting !== '0'
+    skipExisting: p.skipExisting !== '0',
+    problemOnly: p.problemOnly === '1'
   });
 }
 
@@ -93,7 +95,7 @@ function rapi_start_(p) {
 function rapi_imagecheck_(p) {
   const keywords = rapi_keywords_(p.keywords);
   if (!keywords.length) return { ok: false, reason: 'keywords 파라미터가 비어 있습니다.' };
-  const folder = getFolderByPath(PL.SEARCH_FOLDER);
+  const folder = getFolderByPath(pl_searchFolderPath_());
   const kws = keywords.map(k => ({ k: k, l: nfc_(k).toLowerCase(), prob: {}, sol: {}, png: 0, pdf: 0, other: [] }));
   const ITEM_RE = /_(문제|해설)_(.+?)(?:_c\d+)?\.(png|pdf)$/i;
   const seen = {}, dupSamples = [];

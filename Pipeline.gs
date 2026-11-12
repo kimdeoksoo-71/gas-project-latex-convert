@@ -19,6 +19,13 @@
  *  정체·공백 (v4 §3.3) — lastTickAt / lastChangeAt / progress
  *  스크립트 속성 — PL_TICK_BUDGET_MS(240000) · PL_OCR_GAP_MS(15000) · LATEX_ARCH_SSID_<yyyy>(연도별 아카이브 파일) · PL_MPX_RATE_PER_MIN(50)
  *
+ *  [KICE 사본 · latex-kice-1.0.0] 원본(latex-1.1.1)과 다른 곳 — 계획서 v5 §6-4
+ *   ① 입력 폴더 = 속성 PL_SEARCH_FOLDER (기본 'KICE윤문/IMAGE_DS'). 원본의 PBMAI/IMAGE_DS 를 읽지 않는다.
+ *   ② findPdf_ 의 Drive 전체 이름 검색 폴백 끔 (Mathpix 그림 추출.gs)
+ *   ③ start 옵션 problemOnly — 해설 없는 문항도 C 를 비운 채 Data_DS 로 보낸다 (평가원 시험지)
+ *   ④ 아카이브 파일 이름 접두 'KICE_latex_arch_' — 원본의 Latex_arch_<yyyy> 와 이름 검색으로 섞이지 않는다
+ *   운영값: 완료 메일 끔 · Mathpix 분당 기본 25 · 그림 폴더 기본 'KICE윤문/IMAGE_FIG'
+ *
  *  의존(기존 파일의 전역 함수):
  *   clearBelowHeader_            (Data1, Data_Latex 초기화.gs)
  *   getFolderByPath, collectPngNameUrlPairs, nfc_ (링크&파일명 추출(키워드).gs)
@@ -33,16 +40,17 @@ const PL = {
   TICK_FN: 'pipeline_tick',                 // 옛 트리거 정리용 (새 트리거는 만들지 않는다)
   TICK_BUDGET_PROP: 'PL_TICK_BUDGET_MS', TICK_BUDGET_DEFAULT: 240 * 1000,   // D13
   OCR_GAP_PROP: 'PL_OCR_GAP_MS',         OCR_GAP_DEFAULT: 15 * 1000,         // D13 (옛 40초 여유는 그림 동기 대기용)
-  ARCH_SSID_PROP: 'LATEX_ARCH_SSID_',    ARCH_NAME: 'Latex_arch_',           // C-13 · 연도별(10/30 덕수님): 속성 LATEX_ARCH_SSID_<yyyy>, 파일 Latex_arch_<yyyy>
+  ARCH_SSID_PROP: 'LATEX_ARCH_SSID_',    ARCH_NAME: 'KICE_latex_arch_',      // C-13 · 연도별: 속성 LATEX_ARCH_SSID_<yyyy>, 파일 KICE_latex_arch_<yyyy>  [KICE 사본 ④: 원본은 'Latex_arch_']
   LOCK_WAIT_MS: 3000,                       // C-16
-  SEARCH_FOLDER: 'PBMAI/IMAGE_DS',
+  SEARCH_FOLDER_PROP: 'PL_SEARCH_FOLDER', SEARCH_FOLDER: 'KICE윤문/IMAGE_DS',   // [KICE 사본 ①] 속성이 비면 이 기본값. 원본은 'PBMAI/IMAGE_DS' 고정
+  MPX_RATE_DEFAULT: 25,                     // [KICE 사본] Mathpix 분당 기본값 (원본 50 — 같은 계정을 나눠 쓴다)
   DATA1_SHEET: 'Data1',
   SRC_SHEET: 'Data_Latex',
   DST_SHEET: 'Data_DS',
   LOG_SHEET: 'Pipeline_Log',
   REPORT_SHEET: 'Pipeline_Report',
   MAX_ATTEMPTS: 3,                          // Latex 변환 재시도 상한 (_MPR.CFG.MAX_ATTEMPTS 와 동일하게)
-  EMAIL_ON_FINISH: true,
+  EMAIL_ON_FINISH: false,                   // [KICE 사본] 세트마다 완료 메일이 오지 않게 끔 (원본 true)
   SEND_CHUNK: 100, NORM_CHUNK: 25, ARCH_CHUNK: 200,    // D14 · R-02 · C-13
   ARCH_COLS: 16,                            // Data_Latex A:P
   HEAD_N: 20,
@@ -188,7 +196,8 @@ function pipeline_startCore_(keywords, opts) {
   const now = Date.now();
   const st = {
     stage: 'clear', keywords: keywords, startedAt: new Date(now).toISOString(), runId: '',
-    opts: { until: until, fig: opts.fig !== false, skipExisting: opts.skipExisting !== false, driver: driver },
+    opts: { until: until, fig: opts.fig !== false, skipExisting: opts.skipExisting !== false, driver: driver,
+            problemOnly: opts.problemOnly === true },                           // [KICE 사본 ③]
     ticks: 0, lastTickAt: 0, lastChangeAt: now, progress: 0,
     search: { n: {}, skipped: {}, data1Rows: 0 },
     latex: { ok: 0, err: 0, left: 0 },
@@ -201,7 +210,7 @@ function pipeline_startCore_(keywords, opts) {
   };
   st.runId = st.startedAt;
   pl_saveState_(st);
-  pl_log_(st, 'start', `키워드: ${keywords.join(' | ')} / driver=${driver} until=${until} fig=${st.opts.fig} skipExisting=${st.opts.skipExisting}`);
+  pl_log_(st, 'start', `키워드: ${keywords.join(' | ')} / driver=${driver} until=${until} fig=${st.opts.fig} skipExisting=${st.opts.skipExisting} problemOnly=${st.opts.problemOnly}`);
   return { ok: true, runId: st.runId, stage: st.stage };
 }
 
@@ -265,6 +274,11 @@ function pl_prop_(name, def) {
   return (isFinite(v) && v > 0) ? v : def;
 }
 function pl_budget_() { return pl_prop_(PL.TICK_BUDGET_PROP, PL.TICK_BUDGET_DEFAULT); }
+/** [KICE 사본 ①] 입력 폴더 경로 — 속성 PL_SEARCH_FOLDER, 비면 PL.SEARCH_FOLDER. search·imagecheck·메뉴 검색이 모두 이것을 쓴다 */
+function pl_searchFolderPath_() {
+  const v = String(PropertiesService.getScriptProperties().getProperty(PL.SEARCH_FOLDER_PROP) || '').trim();
+  return v || PL.SEARCH_FOLDER;
+}
 function pl_ocrGap_() { return pl_prop_(PL.OCR_GAP_PROP, PL.OCR_GAP_DEFAULT); }
 
 /** 메뉴·레거시 호환 래퍼 */
@@ -415,7 +429,7 @@ function pl_runStage_(st, deadline) {
       const src = ss.getSheetByName(PL.SRC_SHEET);
       const last = pl_lastNonEmptyRowInColA_(src);
       if (last < 2) { st.stage = (st.opts.until === 'done') ? 'send' : 'fig_done'; return 'next'; }
-      const r = mpf_processBatchBudget(2, last, deadline, { rate: pl_prop_('PL_MPX_RATE_PER_MIN', 50) });
+      const r = mpf_processBatchBudget(2, last, deadline, { rate: pl_prop_('PL_MPX_RATE_PER_MIN', PL.MPX_RATE_DEFAULT) });
       st.fig.done = r.done; st.fig.err = r.err; st.fig.noPdf = r.noPdf;
       st.fig.submitted = r.submitted; st.fig.left = r.left; st.fig.submittedTotal += r.submittedNow;
       if (r.submitted + r.left > 0) return 'yield';
@@ -464,7 +478,7 @@ function pl_runStage_(st, deadline) {
  * search (P-10 skipExisting · C-18 행 수 대조)
  * ================================================= */
 function pl_stageSearch_(st, ss, deadline) {
-  const folder = getFolderByPath(PL.SEARCH_FOLDER);
+  const folder = getFolderByPath(pl_searchFolderPath_());
   let sh = ss.getSheetByName(PL.DATA1_SHEET); if (!sh) sh = ss.insertSheet(PL.DATA1_SHEET);
   const seen = new Set();
   const last = sh.getLastRow();
@@ -593,8 +607,9 @@ function pl_stageSend_(st, ss, deadline) {
   const rowsOut = [], skippedDup = [], incomplete = [];
   Array.from(pairs.entries()).sort((a, b) => a[1].order - b[1].order).forEach(([key, p]) => {
     if (existing.has(nfc_(key))) { skippedDup.push(key); return; }
-    if (p.problem === null || p.solution === null) { incomplete.push(key + (p.problem === null ? '(문제 없음)' : '(해설 없음)')); return; }   // D19
-    rowsOut.push([key, p.problem, p.solution]);
+    const problemOnly = !!(st.opts && st.opts.problemOnly);                     // [KICE 사본 ③] 해설이 없어도 문제만으로 보낸다
+    if (p.problem === null || (p.solution === null && !problemOnly)) { incomplete.push(key + (p.problem === null ? '(문제 없음)' : '(해설 없음)')); return; }   // D19
+    rowsOut.push([key, p.problem, p.solution === null ? '' : p.solution]);
   });
 
   if (!st.ds.cursor) {                                                         // 첫 회차: 집계 기록

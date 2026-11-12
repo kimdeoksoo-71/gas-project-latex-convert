@@ -16,7 +16,7 @@ function runSearchAndAppend() {
   const keyword = (res.getResponseText() || '').trim();
   if (!keyword) { ui.alert('검색어가 비어 있습니다.'); return; }
 
-  const folder = getFolderByPath('PBMAI/IMAGE_DS'); // \, / 모두 허용
+  const folder = getFolderByPath(pl_searchFolderPath_()); // [KICE 사본 ①] 속성 PL_SEARCH_FOLDER (기본 KICE윤문/IMAGE_DS)
   const pairs = collectPngNameUrlPairs(folder, keyword);
   if (pairs.length === 0) { ui.alert('조건에 맞는 PNG 파일이 없습니다.'); return; }
 

@@ -48,7 +48,7 @@ const _MPF = (function () {
     HEADERS: ['pdf_id', 'fig_status', 'fig_files', 'fig_links', 'latex_fig'],   // K1~O1
     INTO_LATEX: true,   // 그림이 1개 이상 저장되면 C열(latex) ← O열(latex_fig), 원래 v3/text 결과는 D열(text)에 보관
     FIG_FOLDER_PROP: 'MPF_FIG_FOLDER_PATH',
-    FIG_FOLDER_DEFAULT: 'PBMAI/IMAGE_FIG',
+    FIG_FOLDER_DEFAULT: 'KICE윤문/IMAGE_FIG',   // [KICE 사본] 속성 MPF_FIG_FOLDER_PATH 가 비어도 원본 PBMAI/IMAGE_FIG 를 건드리지 않게
     PROP_START: 'MPF_RANGE_START',
     PROP_END:   'MPF_RANGE_END',
     PROP_STOP:  'MPF_STOP_FLAG',
@@ -113,7 +113,8 @@ const _MPF = (function () {
     return getOrCreateFolderByPath_(p || CFG.FIG_FOLDER_DEFAULT);
   }
 
-  /** PNG 와 같은 폴더에서 <stem>.pdf 찾기 → 없으면 Drive 전체 이름 검색 */
+  /** PNG 와 같은 폴더에서 <stem>.pdf 찾기. [KICE 사본 ②] Drive 전체 이름 검색 폴백은 끈다 — 원본 폴더의 동명 PDF 가 섞이지 않게.
+   *  속성 MPF_PDF_GLOBAL_SEARCH = 1 일 때만 옛 폴백을 쓴다. */
    function findPdf_(pngLinkOrId, stem) {
     const base = String(stem || '') + '.pdf';
     const cands = [base];
@@ -132,6 +133,7 @@ const _MPF = (function () {
         }
       }
     } catch (_) { }
+    if (String(PropertiesService.getScriptProperties().getProperty('MPF_PDF_GLOBAL_SEARCH') || '') !== '1') return null;   // [KICE 사본 ②]
     for (const nm of cands) {
       const it = DriveApp.getFilesByName(nm);
       if (it.hasNext()) return it.next();
