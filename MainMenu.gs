@@ -9,6 +9,8 @@ function onOpen() {
   mainMenu.addItem('첫번째 셀로 합치기','mergeSelectedCellsToTopAndClearRest');
   mainMenu.addItem('⏺️ 문항 정규화', 'ds_runNormalizeAndValidate_byRowInput');
   mainMenu.addItem('🔎 정규화 점검 (쓰기 없음)', 'ds_auditNormalize_byRowInput');
+  mainMenu.addItem('🧹 기존 행 후처리 (행 범위)', 'pp_runRange');            // 2026-11-17 latex-1.2.0 (PostProcess.gs)
+  mainMenu.addItem('🔎 후처리 점검 (쓰기 없음)', 'pp_auditRange');
   mainMenu.addSeparator();
   mainMenu.addItem('▶ 원클릭 파이프라인 (키워드 → Data_DS)', 'pipeline_start');
   mainMenu.addItem('⏭ 이어하기 (멈춘 단계에서 다음 단계 선택)', 'pipeline_resume_menu');   // 패치 13

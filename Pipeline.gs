@@ -1,5 +1,5 @@
 /*************************************************
- * Pipeline.gs — 키워드 입력 한 번으로 자동 실행 (패치 13 · latex-1.1.0 · 대량 변환 계획서 v4 §3)
+ * Pipeline.gs — 키워드 입력 한 번으로 자동 실행 (패치 13 · latex-1.1.0 · 대량 변환 계획서 v4 §3 / 2026-11-17 latex-1.2.0: postfix 단계)
  *
  *  [메뉴] ▶ 원클릭 파이프라인 : pipeline_start          (첫 tick 만 직접 실행, 트리거 없음)
  *  [메뉴] ⏭ 이어하기            : pipeline_resume_menu    (멈춘 단계에서 다음 단계 선택 → tick 1회)
@@ -9,7 +9,8 @@
  *  [웹앱] RemoteApi.gs 가 start/tick/resume/status/stop/sheetcheck 로 같은 코어를 부른다.
  *
  *  단계(stage) — 계획서 v4 §3.1
- *   clear → search → latex → latex_done⏸ → fig → fig_done⏸ → send → normalize → answer → archive → done
+ *   clear → search → latex → latex_done⏸ → fig → fig_done⏸ → send → normalize → answer → postfix → archive → done
+ *   · postfix (2026-11-17 · latex-1.2.0): Data_DS 후처리 — 식 번호 원문자 정본·경우 분류 행 분리 등 (PostProcess.gs)
  *   · ⏸ 단계에서는 tick 이 {result:'paused'} 를 돌려주고 아무것도 하지 않는다. resume(from) 으로 다음 단계를 고른다.
  *   · opts.until = 'latex'(기본) | 'fig' | 'done'. 'done' 이면 ⏸ 없이 끝까지(메뉴 기본).
  *   · opts.driver = 'trigger'(기본: 메뉴·러너 — yield 때마다 1분 뒤 pipeline_tick 트리거로 스스로 이어감, 옛 동작)
@@ -17,6 +18,7 @@
  *
  *  상태 PL_STATE (v4 §3.2) — 목록은 개수+앞 20개만, 전체는 Pipeline_Report 시트 (R-03)
  *  정체·공백 (v4 §3.3) — lastTickAt / lastChangeAt / progress
+ *  기록: 후처리 결과는 Data_DS 의 `postfix` 열(Q열 이후)과 Pipeline_Report(postfix.review.*)에 남는다
  *  스크립트 속성 — PL_TICK_BUDGET_MS(240000) · PL_OCR_GAP_MS(15000) · LATEX_ARCH_SSID_<yyyy>(연도별 아카이브 파일) · PL_MPX_RATE_PER_MIN(50)
  *
  *  의존(기존 파일의 전역 함수):
@@ -26,6 +28,7 @@
  *   mpf_processBatchBudget       (Mathpix 그림 추출.gs)
  *   dlds_parseFilename_, dlds_lastDataRow_, dlds_embedFigLinks_, ds_fillGivenAnswerRows_, DLDS (Datalatex_To_Data_DS.gs)
  *   ds_normalizeRows_, ds_statSummary_, DSN (normalizeProblem.gs)
+ *   pp_processRows_ (PostProcess.gs)
  *************************************************/
 
 const PL = {
@@ -44,6 +47,7 @@ const PL = {
   MAX_ATTEMPTS: 3,                          // Latex 변환 재시도 상한 (_MPR.CFG.MAX_ATTEMPTS 와 동일하게)
   EMAIL_ON_FINISH: true,
   SEND_CHUNK: 100, NORM_CHUNK: 25, ARCH_CHUNK: 200,    // D14 · R-02 · C-13
+  POST_CHUNK: 50,                           // postfix 묶음 (읽기 1회·쓰기 3회)
   ARCH_COLS: 16,                            // Data_Latex A:P
   HEAD_N: 20,
   STALL_MS: 20 * 60 * 1000, STALL_FIG_MS: 40 * 60 * 1000, GAP_RESET_MS: 5 * 60 * 1000,   // §3.3
@@ -53,8 +57,8 @@ const PL = {
   RESUME: {                                 // C-17 · D20 · R1 #5 전이표 (error/stopped 는 pl_resumeGuard_ 로 추가 검사)
     latex_done: ['latex', 'fig', 'send'],
     fig_done:   ['fig', 'send'],
-    error:      ['latex', 'fig', 'send', 'normalize', 'archive'],
-    stopped:    ['latex', 'fig', 'send', 'normalize', 'archive']
+    error:      ['latex', 'fig', 'send', 'normalize', 'postfix', 'archive'],
+    stopped:    ['latex', 'fig', 'send', 'normalize', 'postfix', 'archive']
   },
   RESUME_AFTER_MS: 60 * 1000,               // driver=trigger 일 때 이어하기 트리거 지연
   LEGACY_HANDLERS: ['mpr__continueRange', 'mpf__continue', 'mpb__processNextBatchStatus'],   // R1 #3 잔존 트리거
@@ -94,7 +98,7 @@ function pipeline_start() {
   const ok = ui.alert('확인',
     `키워드 ${keywords.length}개: ${keywords.join(' | ')}\n\n` +
     `${PL.DATA1_SHEET}, ${PL.SRC_SHEET}(B열~)의 2행 이하를 초기화한 뒤\n` +
-    `검색 → Latex 변환 → 그림 추출 → Data_DS 전송 → 정규화 → 정답 채우기 → 보관 을 실행합니다.\n` +
+    `검색 → Latex 변환 → 그림 추출 → Data_DS 전송 → 정규화 → 정답 채우기 → 후처리 → 보관 을 실행합니다.\n` +
     `한 번에 ${Math.round(pl_budget_() / 1000)}초씩 진행되며, 시간이 더 필요하면 '⏭ 이어하기' 를 누르세요.\n` +
     `(맥미니 펌프가 돌고 있으면 자동으로 이어집니다)\n계속할까요?`,
     ui.ButtonSet.YES_NO);
@@ -196,6 +200,7 @@ function pipeline_startCore_(keywords, opts) {
     ds: { count: 0, writeStart: 0, writeEnd: 0, cursor: 0, total: 0, skippedDup: { n: 0, head: [] }, incomplete: { n: 0, head: [] } },
     norm: { cursor: 0, end: 0, ok: 0, fail: 0, review: { n: 0, head: [] }, warn: {} },
     ans: { ok: 0, miss: { n: 0, head: [] }, conflict: { n: 0, head: [] }, skipped: 0 },
+    post: { cursor: 0, end: 0, rows: 0, changed: 0, rules: {}, review: {}, reclassify: { n: 0, head: [] } },
     archive: { ssId: '', sheet: '', cursor: 0, done: false },
     error: ''
   };
@@ -219,6 +224,7 @@ function pl_resumeGuard_(st, from) {
   if (!PL.FINISHED.includes(st.stage)) return '';
   if (from === 'send' && !(st.latex && st.latex.ok > 0)) return 'send 는 Latex 변환 성공 행이 있어야 합니다 (latex.ok 0)';
   if (from === 'normalize' && !(st.ds && st.ds.writeStart > 0)) return 'normalize 는 send 가 Data_DS 에 쓴 뒤에만 됩니다 (ds.writeStart 0)';
+  if (from === 'postfix' && !(st.ds && st.ds.writeStart > 0)) return 'postfix 는 send 가 Data_DS 에 쓴 뒤에만 됩니다 (ds.writeStart 0)';
   if (from === 'fig') {
     const left = pl_latexTargetRows_(SpreadsheetApp.getActive()).length;
     if (left > 0) return `fig 는 Latex 대상 행이 0 이어야 합니다 (남은 대상 ${left}행 — resume latex 먼저)`;
@@ -252,6 +258,7 @@ function pipeline_resumeCore_(from) {
   st.error = '';
   st.lastChangeAt = Date.now();                 // 사람이 개입했으니 정체 시계도 새로
   if (from === 'fig') { st.fig.submitted = 0; st.fig.left = 0; }
+  if (from === 'postfix' && st.post) st.post.cursor = 0;   // 처음부터 다시(멱등 — 이미 고친 행은 변하지 않는다)
   pl_saveState_(st);
   pl_log_(st, 'resume', `${prev} → ${from}`);
   return { ok: true, stage: st.stage };
@@ -354,6 +361,7 @@ function pl_progressValue_(st) {
     case 'fig': return st.fig.done + st.fig.err + st.fig.noPdf + st.fig.submittedTotal;
     case 'send': return st.ds.cursor;
     case 'normalize': return st.norm.cursor;
+    case 'postfix': return st.post ? st.post.cursor : 0;
     case 'archive': return st.archive.cursor;
     default: return -1;                        // clear·search·answer 는 한 tick 안에 끝난다
   }
@@ -368,6 +376,7 @@ function pl_progress_(st) {
     latexOk: l.ok || 0, latexErr: l.err || 0, latexLeft: l.left || 0,
     figDone: f.done || 0, figErr: f.err || 0, figNoPdf: f.noPdf || 0, figSubmitted: f.submitted || 0, figLeft: f.left || 0,
     normCursor: n.cursor || 0, normEnd: n.end || 0,
+    postCursor: st.post ? (st.post.cursor || 0) : 0, postEnd: st.post ? (st.post.end || 0) : 0,
     sendCursor: st.ds ? st.ds.cursor : 0, sendTotal: st.ds ? st.ds.total : 0,
     lastChangeAt: st.lastChangeAt || 0, lastTickAt: st.lastTickAt || 0
   };
@@ -450,6 +459,29 @@ function pl_runStage_(st, deadline) {
       const s = ds_fillGivenAnswerRows_(dst, rows);
       st.ans = { ok: s.ok, miss: pl_slim_(st, 'ans.miss', s.miss), conflict: pl_slim_(st, 'ans.conflict', s.conflict), skipped: s.skipped };
       pl_log_(st, 'answer', `정답 성공 ${s.ok}, 미검출 ${s.miss.length}, 유형 불일치 ${s.conflict.length}`);
+      st.stage = 'postfix'; return 'next';
+    }
+
+    case 'postfix': {
+      // 2026-11-17 (계획 v4 P3): 이번 런이 Data_DS 에 쓴 행만 후처리한다. 묶음마다 상태를 저장해 끊겨도 이어 간다(멱등이라 다시 돌아도 같다)
+      const sh = ss.getSheetByName(PL.DST_SHEET);
+      if (!sh) throw new Error(`${PL.DST_SHEET} 시트를 찾을 수 없습니다.`);
+      if (!st.post) st.post = { cursor: 0, end: 0, rows: 0, changed: 0, rules: {}, review: {}, reclassify: { n: 0, head: [] } };   // 옛 상태에서 resume 한 경우
+      if (!st.post.cursor) { st.post.cursor = st.ds.writeStart; st.post.end = st.ds.writeEnd; }
+      if (!(st.ds.writeStart > 0)) { pl_log_(st, 'postfix', '대상 행 없음'); st.stage = 'archive'; return 'next'; }
+      while (st.post.cursor <= st.post.end && Date.now() < deadline - 20000) {
+        const end = Math.min(st.post.cursor + PL.POST_CHUNK - 1, st.post.end);
+        const r = pp_processRows_(sh, st.post.cursor, end);
+        st.post.rows += r.rows; st.post.changed += r.changed;
+        Object.keys(r.rules).forEach(k => { st.post.rules[k] = (st.post.rules[k] || 0) + r.rules[k]; });
+        Object.keys(r.review).forEach(k => { st.post.review[k] = (st.post.review[k] || 0) + r.review[k].length; pl_report_(st, 'postfix.review.' + k, r.review[k].length, r.review[k].join(', ')); });
+        if (r.reclassify.length) { st.post.reclassify.n += r.reclassify.length; r.reclassify.forEach(x => { if (st.post.reclassify.head.length < PL.HEAD_N) st.post.reclassify.head.push(x); }); }
+        st.post.cursor = end + 1;
+        pl_saveState_(st);
+      }
+      if (st.post.cursor <= st.post.end) return 'yield';
+      const rv = Object.keys(st.post.review).sort().map(k => `${k} ${st.post.review[k]}`).join(', ');
+      pl_log_(st, 'postfix', `후처리 ${st.post.rows}행 — 바뀐 행 ${st.post.changed} (${Object.keys(st.post.rules).sort().map(k => k + ' ' + st.post.rules[k]).join(', ') || '규칙 적용 없음'})` + (rv ? ` / 검토 ${rv}` : ''));
       st.stage = 'archive'; return 'next';
     }
 
@@ -833,6 +865,9 @@ function pl_summary_(st) {
   if (st.ans && (st.ans.ok || cnt(st.ans.miss))) lines.push(`정답: 성공 ${st.ans.ok}, 미검출 ${cnt(st.ans.miss)}` +
     (cnt(st.ans.miss) ? ` (행 ${head(st.ans.miss).join(', ')}${cnt(st.ans.miss) > PL.HEAD_N ? ' …' : ''})` : '') +
     (cnt(st.ans.conflict) ? `, 유형 불일치 ${cnt(st.ans.conflict)}` : ''));
+  if (st.post && st.post.rows) lines.push(`후처리: ${st.post.rows}행 중 ${st.post.changed}행 고침` +
+    (Object.keys(st.post.review || {}).length ? ` / 검토 ` + Object.keys(st.post.review).sort().map(k => `${k} ${st.post.review[k]}`).join(', ') : '') +
+    (cnt(st.post.reclassify) ? ` / 재분류로 건너뜀 ${cnt(st.post.reclassify)} (행 ${head(st.post.reclassify).join(', ')})` : ''));
   if (st.archive && st.archive.done) lines.push(`보관: ${st.archive.sheet}`);
   if (st.error) lines.push(`오류: ${st.error}`);
   lines.push(`전체 목록은 ${PL.REPORT_SHEET} 시트 참고`);

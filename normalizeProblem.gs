@@ -21,7 +21,7 @@
  *
  * 부수 효과(제자리 덮어쓰기)
  *  - B열: itemize 래퍼 제거(DSN.UNWRAP_ITEMIZE) + mcq 확정 행의 선지 마커 5곳만 ①~⑤ 로 통일 (DSN.REWRITE_RAW_MARKERS)
- *  - C열: 첫머리 "정답 (n)" → "정답 ⓝ" (기존) + itemize 래퍼 제거
+ *  - C열: 첫 3줄 안 `\section*{…}` 벗기기(2026-11-17) + 첫머리 "정답 (n)" → "정답 ⓝ" (기존) + itemize 래퍼 제거
  *
  * 진입점
  *  - 메뉴 '⏺️ 문항 정규화'      : ds_runNormalizeAndValidate_byRowInput  (행 범위 입력)
@@ -329,7 +329,10 @@ function ds_normalizeRow_(sh, row, opts) {
       const solCell = sh.getRange(row, DSN.COL.solution);
       const solRaw = String(solCell.getDisplayValue() || '');
       if (solRaw) {
-        let solNorm = normalizeSolutionAnswerMarker_(solRaw);
+        // 2026-11-17 (계획 v4 A5): 첫 3줄 안의 `\section*{13.}` 을 먼저 벗긴다 — 번호 줄이 제목 명령에 싸여 있으면
+        //   정답 마커 정규화도, answer 단계의 번호 떼기도 그 줄을 못 알아본다(6811·6889·6964·6965행 실측, D열 비어 있음)
+        let solNorm = (typeof pp_unwrapSectionHead_ === 'function') ? pp_unwrapSectionHead_(solRaw) : solRaw;
+        solNorm = normalizeSolutionAnswerMarker_(solNorm);
         if (DSN.UNWRAP_ITEMIZE !== false) solNorm = unwrapItemize_(solNorm);
         if (solNorm !== solRaw) solCell.setValue(solNorm);
       }
