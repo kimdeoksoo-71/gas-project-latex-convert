@@ -35,10 +35,47 @@ function doGet(e) {
       case 'stop':   return rapi_json_(pipeline_stopCore_('원격 중지 (RemoteApi)'));
       case 'sheetcheck': return rapi_json_(Object.assign({ ok: true }, pl_sheetcheck_(rapi_keywords_(p.keywords))));
       case 'imagecheck': return rapi_json_(rapi_imagecheck_(p));
+      case 'postfix':    return rapi_json_(rapi_postfix_(p));          // 2026-11-17: 기존 행 후처리·점검 (PostProcess.gs)
       default:       return rapi_json_({ ok: false, reason: 'unknown cmd: ' + p.cmd });
     }
   } catch (err) {
     return rapi_json_({ ok: false, reason: String((err && err.message) || err) });
+  }
+}
+
+/**
+ * 기존 행 후처리 / 점검 (2026-11-17 · 메뉴 '기존 행 후처리'·'후처리 점검'과 같은 코어 pp_processRows_).
+ *   start · end : Data_DS 행 번호 (필수, start ≥ 2)
+ *   write       : 1 이면 시트에 쓴다. 없으면 **점검만**(쓰기 없음 — 기록 열도 만들지 않는다)
+ * 한 번 호출에 tick 예산 안에서 되는 만큼만 하고 `next`(남은 첫 행, 다 했으면 null)를 돌려준다 → 부르는 쪽이 next 부터 다시 부른다.
+ * 쓰기는 파이프라인이 실행 중이면 거부한다. 규칙이 멱등이라 같은 범위를 다시 불러도 결과는 같다.
+ */
+function rapi_postfix_(p) {
+  const write = p.write === '1';
+  const a = parseInt(p.start, 10), bRaw = parseInt(p.end, 10);
+  if (!(a >= 2) || !(bRaw >= a)) return { ok: false, reason: 'start·end(행 번호, start ≥ 2, end ≥ start)가 필요합니다.' };
+  if (write && pl_isBusy_()) return { ok: false, reason: '파이프라인이 실행 중입니다 — 끝난 뒤에 쓰세요.' };
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(PL.LOCK_WAIT_MS)) return { ok: false, reason: 'locked' };
+  try {
+    const sh = SpreadsheetApp.getActive().getSheetByName(PL.DST_SHEET);
+    if (!sh) return { ok: false, reason: PL.DST_SHEET + ' 시트 없음' };
+    const t0 = Date.now(), deadline = t0 + pl_budget_() - 30000;
+    const last = dlds_lastDataRow_(sh, 1), b = Math.min(bRaw, last);
+    const tot = { rows: 0, changed: 0, rules: {}, review: {}, reclassify: { n: 0, head: [] } };
+    let cur = a;
+    while (cur <= b && Date.now() < deadline) {
+      const end = Math.min(cur + PL.POST_CHUNK - 1, b);
+      const st = pp_processRows_(sh, cur, end, { dryRun: !write });
+      tot.rows += st.rows; tot.changed += st.changed;
+      Object.keys(st.rules).forEach(k => { tot.rules[k] = (tot.rules[k] || 0) + st.rules[k]; });
+      Object.keys(st.review).forEach(k => { const o = (tot.review[k] = tot.review[k] || { n: 0, head: [] }); o.n += st.review[k].length; st.review[k].forEach(r => { if (o.head.length < 50) o.head.push(r); }); });
+      tot.reclassify.n += st.reclassify.length; st.reclassify.forEach(r => { if (tot.reclassify.head.length < 50) tot.reclassify.head.push(r); });
+      cur = end + 1;
+    }
+    return Object.assign({ ok: true, write: write, start: a, end: b, lastRow: last, doneTo: cur - 1, next: cur <= b ? cur : null, elapsedMs: Date.now() - t0 }, tot);
+  } finally {
+    try { lock.releaseLock(); } catch (_) {}
   }
 }
 
