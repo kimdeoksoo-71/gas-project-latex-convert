@@ -251,7 +251,7 @@ function pp_labels_(B, C, opts) {
   let b = String(B == null ? '' : B), c = String(C == null ? '' : C);
   const review = [];
   const jre = new RegExp('[' + PP_J + ']');
-  if (!jre.test(b + c) && (b + c).indexOf('\\tag') < 0) return { B: b, C: c, review: review };
+  if (!jre.test(b + c) && (b + c).indexOf('\\tag') < 0 && !/[㉠-㉭]/.test(b + c)) return { B: b, C: c, review: review };
 
   let bTail = '';
   const win = pp_choiceStart_(b, opts.type);
@@ -319,14 +319,17 @@ function pp_labels_(B, C, opts) {
   const all1 = b + '\n' + c; const defs = {};
   const dre = new RegExp(PP_LEAD_SRC + '[\\s$~]*(?:\\\\text\\s*\\{\\s*)?([㉠-㉭])', 'g');
   while ((m = dre.exec(all1)) !== null) defs[MPX_TAG_CIRCLED.indexOf(m[1]) + 1] = true;
-  const missing = Object.keys(citedNow).map(Number).filter(function (n) { return !defs[n]; }).sort(function (x, y) { return x - y; });
+  // 쓰인 글자 = 이번에 바꾼 인용 + 이미 원문자로 있던 것(다시 돌려도 같은 표시가 나오도록 — 기록 열이 실행마다 달라지면 안 된다)
+  const used = {}; Object.keys(citedNow).forEach(function (k) { used[k] = true; });
+  const ure = /[㉠-㉭]/g; while ((m = ure.exec(all1)) !== null) used[MPX_TAG_CIRCLED.indexOf(m[0]) + 1] = true;
+  const missing = Object.keys(used).map(Number).filter(function (n) { return !defs[n]; }).sort(function (x, y) { return x - y; });
   if (missing.length) review.push('DEF_MISSING:' + missing.map(function (n) { return MPX_TAG_CIRCLED[n - 1]; }).join(''));
 
   // 줄에 리더와 라벨뿐인데 붙일 앞 줄이 없었다(글의 첫 줄 등)
   if (new RegExp('^[ \\t]*(?:' + PP_LEAD_SRC + '[ \\t]*)+[㉠-㉭][,.]?[ \\t]*$', 'm').test(all1)) review.push('DEF_DETACHED');
 
   // (d) 본문 오독 의심 — 자동으로 고치지 않는다 (계획 D6)
-  if (evidence || Object.keys(citedNow).length) {
+  if (evidence || Object.keys(used).length) {
     const mis = new RegExp(PP_LEAD_SRC + '[\\s$~]*[(（]\\s*(?:7|L|\\\\neg|¬)?\\s*[)）][ \\t]*[,.]?[ \\t]*$', 'm');
     if (mis.test(all1) || /[(（]\s*(?:\\neg|¬)\s*[)）]/.test(all1)) review.push('MISREAD');
     else if (/^[ \t]*[(（]\s*(?:7|L)?\s*[)）][ \t]*[,.]?[ \t]*$/m.test(all1)) review.push('MISREAD');   // `(7)`·`()`·`(L)` 만 있는 줄 — 떼어진 라벨의 오독
