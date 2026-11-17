@@ -129,8 +129,53 @@ function pp_unwrapSectionHead_(s) {
 /* =================================================
  * R1  식 번호(인용기호) → 원문자 정본
  * ================================================= */
-/** 글 하나에 (b-i) 수식 안 리더 + 라벨  (b-ii) 수식 뒤 행 끝 라벨 을 정본으로. 반환 고친 글 */
+/**
+ * (b-0) 라벨만 홀로 있는 줄 → 앞 줄에 붙인다.
+ *   Mathpix 는 행 끝의 식 번호를 다음 줄로 떼어 놓곤 한다 — `…아니다.⏎⏎⋯⋯⋯ (ㄴ),` · `⇒ 함수 f(x) 는 …⏎(ㄱ)` (439줄 + 리더가 붙은 263줄 실측).
+ *   앞 줄(빈 줄은 건너뛴다)이
+ *     `\]`·`$$` 로 끝나는 display → 그 수식의 마지막 줄 끝에 정본
+ *     인라인 수식으로 끝남      → 그 수식 안 끝에 정본
+ *     산문                      → `… ⋯⋯ ㉠` (텍스트 리더 + 원문자 — Mathory 가 행 끝 정의부로 읽는 모양)
+ *   리더 없는 `(ㄱ)` 줄은 다음 줄이 조사로 시작하면(`(ㄱ)⏎에 대입하면`) 줄이 끊긴 인용이므로 붙이지 않는다.
+ */
+function pp_attachLabelLines_(t) {
+  if (!new RegExp('[' + PP_J + ']').test(t)) return t;
+  const lines = t.split('\n');
+  const leadOnlyMath = '\\$(?:\\s|\\\\quad|\\\\qquad|' + PP_LEAD_SRC + ')+\\$';
+  const re = new RegExp('^[ \\t]*((?:(?:[⋯…]+|\\.{3,}|·{3,}|' + leadOnlyMath + ')[ \\t]*)*)(?:[(（]\\s*([' + PP_J + '])\\s*[)）]|([' + PP_J + ']))[ \\t]*[,.]?[ \\t]*$');
+  let changed = false;
+  for (let i = 0; i < lines.length; i++) {
+    const m = re.exec(lines[i]);
+    if (!m) continue;
+    const leader = pp_strongLeader_(m[1] || '');
+    if (!leader && !m[2]) continue;                                   // 리더도 괄호도 없는 `ㄱ` 한 글자 줄
+    let p = i - 1; while (p >= 0 && (lines[p] === null || !lines[p].trim())) p--;
+    if (p < 0) continue;
+    if (!leader) {
+      let q = i + 1; while (q < lines.length && !lines[q].trim()) q++;
+      if (q < lines.length && /^[ \t]*(?:에서|에게|에 |에$|을 |를 |과 |와 |의 |이 |가 |은 |는 |으로|로 |로부터|,|\))/.test(lines[q])) continue;   // 줄이 끊긴 인용
+    }
+    const n = PP_J.indexOf(m[2] || m[3]) + 1, canon = mpx_canonLabel_(n);
+    const P = lines[p], Pt = P.replace(/\s+$/, '');
+    if (Pt.trim() === '\\]' || Pt.trim() === '$$') {
+      let k = p - 1; while (k >= 0 && (lines[k] === null || !lines[k].trim())) k--;
+      if (k < 0 || /^\s*(?:\\\[|\$\$)\s*$/.test(lines[k])) continue;      // 빈 수식
+      lines[k] = lines[k].replace(/\s+$/, '') + ' ' + canon;
+    } else if (/\\\]$/.test(Pt)) {
+      lines[p] = Pt.slice(0, -2).replace(/\s+$/, '') + ' ' + canon + '\\]';
+    } else if (/[^$]\$$/.test(Pt) && (Pt.match(/(?:^|[^\\])\$/g) || []).length % 2 === 0) {
+      lines[p] = Pt.slice(0, -1).replace(/\s+$/, '') + ' ' + canon + '$';
+    } else {
+      lines[p] = Pt + ' ⋯⋯ ' + MPX_TAG_CIRCLED[n - 1];
+    }
+    lines[i] = null; changed = true;
+  }
+  return changed ? lines.filter(function (l) { return l !== null; }).join('\n') : t;
+}
+
+/** 글 하나에 (b-0) 라벨만 있는 줄  (b-i) 수식 안 리더 + 라벨  (b-ii) 수식 뒤 행 끝 라벨 을 정본으로. 반환 고친 글 */
 function pp_defsInText_(t) {
+  t = pp_attachLabelLines_(t);
   // (b-i) 수식 영역 안: 행 끝(`\\`·`\end{`·영역 끝)의 [리더] + `\text{(ㄱ)}` | `(ㄱ)` | `ㄱ`
   const reIn = new RegExp('(?:\\s|\\\\quad|\\\\qquad|~)*((?:' + PP_LEAD_SRC + '\\s*)+)'
     + '(?:\\\\text\\s*\\{\\s*[(（]?\\s*([' + PP_J + '])\\s*[)）]?\\s*\\}|[(（]?\\s*([' + PP_J + '])\\s*[)）]?)'
@@ -277,13 +322,14 @@ function pp_labels_(B, C, opts) {
   const missing = Object.keys(citedNow).map(Number).filter(function (n) { return !defs[n]; }).sort(function (x, y) { return x - y; });
   if (missing.length) review.push('DEF_MISSING:' + missing.map(function (n) { return MPX_TAG_CIRCLED[n - 1]; }).join(''));
 
-  // 줄에 리더와 라벨뿐이고 윗줄이 수식이 아니다 — 어느 식의 번호인지 글만으로는 알 수 없다(Mathpix 가 라벨 줄을 떼어 놓음)
+  // 줄에 리더와 라벨뿐인데 붙일 앞 줄이 없었다(글의 첫 줄 등)
   if (new RegExp('^[ \\t]*(?:' + PP_LEAD_SRC + '[ \\t]*)+[㉠-㉭][,.]?[ \\t]*$', 'm').test(all1)) review.push('DEF_DETACHED');
 
   // (d) 본문 오독 의심 — 자동으로 고치지 않는다 (계획 D6)
   if (evidence || Object.keys(citedNow).length) {
     const mis = new RegExp(PP_LEAD_SRC + '[\\s$~]*[(（]\\s*(?:7|L|\\\\neg|¬)?\\s*[)）][ \\t]*[,.]?[ \\t]*$', 'm');
     if (mis.test(all1) || /[(（]\s*(?:\\neg|¬)\s*[)）]/.test(all1)) review.push('MISREAD');
+    else if (/^[ \t]*[(（]\s*(?:7|L)?\s*[)）][ \t]*[,.]?[ \t]*$/m.test(all1)) review.push('MISREAD');   // `(7)`·`()`·`(L)` 만 있는 줄 — 떼어진 라벨의 오독
   }
   return { B: b + bTail, C: c, review: review };
 }
