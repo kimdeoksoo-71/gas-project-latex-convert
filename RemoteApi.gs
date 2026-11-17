@@ -15,7 +15,7 @@
  */
 
 const RAPI = {
-  VERSION:    'latex-kice-1.1.0',   // 2026-11-17: 원본 latex-1.2.0 반영(postfix 단계·식 번호 원문자 정본). KICE 사본(계획서 v5 §6-4): 원본 + ①입력 폴더 속성 ②PDF 전체검색 끔 ③problemOnly ④아카이브 접두. 이하 원본 이력 — 패치 14: 그림 URL \& 복원(2026-11-08) · 패치 13 (대량 변환 v4): tick / resume / sheetcheck 추가, start 는 트리거를 걸지 않는다
+  VERSION:    'latex-kice-1.1.1',   // 1.1.1 = 통합형(27~) 번호 규칙·renorm 명령. 2026-11-17: 원본 latex-1.2.0 반영(postfix 단계·식 번호 원문자 정본). KICE 사본(계획서 v5 §6-4): 원본 + ①입력 폴더 속성 ②PDF 전체검색 끔 ③problemOnly ④아카이브 접두. 이하 원본 이력 — 패치 14: 그림 URL \& 복원(2026-11-08) · 패치 13 (대량 변환 v4): tick / resume / sheetcheck 추가, start 는 트리거를 걸지 않는다
   PROJECT:    'latex-convert-kice',
   TOKEN_PROP: 'REMOTE_TOKEN',
   LOG_TAIL:   20,
@@ -36,6 +36,7 @@ function doGet(e) {
       case 'sheetcheck': return rapi_json_(Object.assign({ ok: true }, pl_sheetcheck_(rapi_keywords_(p.keywords))));
       case 'imagecheck': return rapi_json_(rapi_imagecheck_(p));
       case 'postfix':    return rapi_json_(rapi_postfix_(p));          // 2026-11-17: 기존 행 후처리·점검 (PostProcess.gs)
+      case 'renorm':     return rapi_json_(rapi_renorm_(p));           // 2026-11-17: 기존 행 재정규화 → 정답 → 후처리
       default:       return rapi_json_({ ok: false, reason: 'unknown cmd: ' + p.cmd });
     }
   } catch (err) {
@@ -74,6 +75,74 @@ function rapi_postfix_(p) {
       cur = end + 1;
     }
     return Object.assign({ ok: true, write: write, start: a, end: b, lastRow: last, doneTo: cur - 1, next: cur <= b ? cur : null, elapsedMs: Date.now() - t0 }, tot);
+  } finally {
+    try { lock.releaseLock(); } catch (_) {}
+  }
+}
+
+/**
+ * 기존 행 재정규화 (2026-11-17): 행 범위에 normalize → answer → postfix 를 다시 돌린다.
+ *   쓰임 ① 정규화 규칙이 바뀐 뒤 이미 들어간 행 고치기(27CXTB07회: 통합형 번호 규칙)  ② 옛 정규화 행(계획 v4 E2)
+ *   start · end : Data_DS 행 번호 (필수, start ≥ 2)
+ *   write       : 1 이면 쓴다. 없으면 점검만 — 유형(K)이 달라질 행 목록을 돌려준다
+ *   정답(D)은 **빈 칸만** 채운다(기존 값은 건드리지 않는다 — ds_fillGivenAnswerRows_ 의 기본 동작).
+ * 범위가 직전 런이 쓴 행(ds.writeStart~writeEnd)과 같고 그 런이 done 이면 PL_STATE 의 norm·ans·post 집계도 새 값으로 바꾼다
+ *   → 러너가 그 런에 다시 붙었을 때(/retry) 고친 결과를 본다.
+ * 한 번에 tick 예산 안에서 되는 만큼만 하고 next 를 돌려준다.
+ */
+function rapi_renorm_(p) {
+  const write = p.write === '1';
+  const a = parseInt(p.start, 10), bRaw = parseInt(p.end, 10);
+  if (!(a >= 2) || !(bRaw >= a)) return { ok: false, reason: 'start·end(행 번호, start ≥ 2, end ≥ start)가 필요합니다.' };
+  if (write && pl_isBusy_()) return { ok: false, reason: '파이프라인이 실행 중입니다 — 끝난 뒤에 쓰세요.' };
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(PL.LOCK_WAIT_MS)) return { ok: false, reason: 'locked' };
+  try {
+    const sh = SpreadsheetApp.getActive().getSheetByName(PL.DST_SHEET);
+    if (!sh) return { ok: false, reason: PL.DST_SHEET + ' 시트 없음' };
+    const t0 = Date.now(), deadline = t0 + pl_budget_() - 30000;
+    const last = dlds_lastDataRow_(sh, 1), b = Math.min(bRaw, last);
+    const out = { ok: true, write: write, start: a, end: b, lastRow: last, rows: 0, typeChanges: [], norm: { ok: 0, fail: 0, review: [] },
+                  ans: { ok: 0, miss: [], conflict: [], skipped: 0 }, post: { rows: 0, changed: 0, rules: {}, review: {}, reclassify: [] } };
+    let cur = a;
+    while (cur <= b && Date.now() < deadline) {
+      const end = Math.min(cur + PL.NORM_CHUNK - 1, b), rows = pl_range_(cur, end);
+      const before = sh.getRange(cur, DSN.OUT.type, end - cur + 1, 1).getValues().map(r => String(r[0] || '').trim());
+      const n = ds_normalizeRows_(sh, rows, { dryRun: !write });
+      out.rows += rows.length; out.norm.ok += n.ok; out.norm.fail += n.fail; n.review.forEach(x => out.norm.review.push(x));
+      if (write) {
+        const after = sh.getRange(cur, DSN.OUT.type, end - cur + 1, 1).getValues().map(r => String(r[0] || '').trim());
+        after.forEach((t, i) => { if (t !== before[i] && out.typeChanges.length < 200) out.typeChanges.push((cur + i) + ':' + before[i] + '→' + t); });
+        const s = ds_fillGivenAnswerRows_(sh, rows);
+        out.ans.ok += s.ok; out.ans.skipped += s.skipped; s.miss.forEach(x => out.ans.miss.push(x)); s.conflict.forEach(x => out.ans.conflict.push(x));
+        const q = pp_processRows_(sh, cur, end);
+        out.post.rows += q.rows; out.post.changed += q.changed;
+        Object.keys(q.rules).forEach(k => { out.post.rules[k] = (out.post.rules[k] || 0) + q.rules[k]; });
+        Object.keys(q.review).forEach(k => { out.post.review[k] = (out.post.review[k] || 0) + q.review[k].length; });
+        q.reclassify.forEach(x => out.post.reclassify.push(x));
+      } else {
+        const blk = sh.getRange(cur, 1, end - cur + 1, DSN.COL.raw).getValues();
+        blk.forEach((v, i) => {
+          const key = String(v[DSN.COL.key - 1] || '').trim(), raw = String(v[DSN.COL.raw - 1] || '').trim();
+          if (!key && !raw) return;
+          const c = ds_classify_(key, raw, DSN);
+          if (c.type !== before[i] && out.typeChanges.length < 200) out.typeChanges.push((cur + i) + ':' + before[i] + '→' + c.type);
+        });
+      }
+      cur = end + 1;
+    }
+    out.doneTo = cur - 1; out.next = cur <= b ? cur : null; out.elapsedMs = Date.now() - t0;
+    // 직전 런의 범위 전체를 다시 한 것이면 그 런의 집계를 새 값으로
+    const st = pl_loadState_();
+    if (write && out.next === null && st && st.stage === 'done' && st.ds && st.ds.writeStart === a && st.ds.writeEnd === b) {
+      st.norm.ok = out.norm.ok; st.norm.fail = out.norm.fail; st.norm.review = pl_slim_(st, 'norm.review', out.norm.review);
+      st.ans = { ok: out.ans.ok + out.ans.skipped, miss: pl_slim_(st, 'ans.miss', out.ans.miss), conflict: pl_slim_(st, 'ans.conflict', out.ans.conflict), skipped: out.ans.skipped };
+      st.post = { cursor: b + 1, end: b, rows: out.post.rows, changed: out.post.changed, rules: out.post.rules, review: out.post.review, reclassify: pl_slim_(st, 'post.reclassify', out.post.reclassify) };
+      pl_saveState_(st);
+      pl_log_(st, 'renorm', `재정규화 ${a}~${b}: 정규화 성공 ${out.norm.ok}·실패 ${out.norm.fail} / 정답 채움 ${out.ans.ok}·그대로 ${out.ans.skipped}·미검출 ${out.ans.miss.length}·불일치 ${out.ans.conflict.length} / 유형 변경 ${out.typeChanges.length}`);
+      out.stateUpdated = true;
+    }
+    return out;
   } finally {
     try { lock.releaseLock(); } catch (_) {}
   }

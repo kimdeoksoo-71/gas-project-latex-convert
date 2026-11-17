@@ -9,6 +9,7 @@
  *  1) 문항번호로 객관식/주관식 선판정  (ds_expectedType_)
  *     - A열 key 의 번호와 B열 첫머리 인쇄 번호를 비교, 다르면 인쇄 번호 우선 + NUM_MISMATCH 경고
  *     - 공통 1~15 / 선택 23~28 → 객관식,  16~22 / 29~30 → 단답형  (DSN.QTYPE_RULES)
+ *     - 2028 통합형 세트(key 가 두 자리 학년도 27 이상으로 시작)는 1~21 객관식 / 22~30 단답형  (DSN.QTYPE_RULES_2028 · 2026-11-17)
  *     - key 가 규칙에 안 맞으면 선판정 없이 현행 방식(파싱 결과만)으로 판정
  *  2) 객관식이면 선지 토크나이저(parseMcqFromRaw_)로 5개 선지 추출
  *     - 마커 (1)~(5), （1）~（5）, ①~⑤, \textcircled{n} 을 모두 인정, 한 문항 안 혼용 허용
@@ -62,8 +63,23 @@ const KEY_RE = /[1345](공통|확통|미적|기하)(\d{2})\s*$/;
 // 본문 첫머리 인쇄 문항번호: "12." / "12)" / "\begin{itemize}\item[12.]"
 const PRINTED_NUM_RE = /^\s*(?:\\begin\{itemize\}\s*\\item\[\s*(\d{1,2})\s*\.?\s*\]|(\d{1,2})\s*[.)])/;
 
-function qtypeFromNum_(num) {
-  const r = DSN.QTYPE_RULES.find(r => num >= r.from && num <= r.to);
+// 2028학년도 통합형 체제(2026-11-17): 객관식 1~21 / 단답형 22~30 (예시문항 정답표). 선택과목 구분이 없다.
+//   27CXTB 서킷(14~20 객관식 · 26~28 단답형)도 이 규칙에 든다. 옛 규칙으로 보면 16~20 이 단답형이 되어 선지를 읽지 않고
+//   `(1)`~`(5)` 마커도 그대로 남았다(27CXTB07회 실측 — 7394~7398행 short_int, 정답 칸 빈칸).
+DSN.QTYPE_RULES_2028 = [
+  { from: 1,  to: 21, type: 'mcq'   },
+  { from: 22, to: 30, type: 'short' }
+];
+// 통합형 세트의 key: 두 자리 학년도 27 이상으로 시작 — `27CXTB07회 (261116)_…` · `27모의X02_…` · `27서킷K04_…`.
+//   옛 체제의 `26모의X…`·`25서킷X…`(두 자리 26 이하), `2027강대모의고사X17회…`·`[2027]강대…`(네 자리 연도)는 해당하지 않는다.
+const KEY_2028_RE = /^\s*(\d{2})(?!\d)/;
+function ds_qtypeRules_(key) {
+  const m = String(key ?? '').match(KEY_2028_RE);
+  return (m && Number(m[1]) >= 27) ? DSN.QTYPE_RULES_2028 : DSN.QTYPE_RULES;
+}
+
+function qtypeFromNum_(num, rules) {
+  const r = (rules || DSN.QTYPE_RULES).find(r => num >= r.from && num <= r.to);
   return r ? r.type : null;
 }
 
@@ -80,11 +96,12 @@ function ds_expectedType_(key, raw) {
   const subject = m[1], keyNum = Number(m[2]);
   const pm = String(raw ?? '').match(PRINTED_NUM_RE);
   const printedNum = pm ? Number(pm[1] || pm[2]) : null;
+  const rules = ds_qtypeRules_(key);                       // 2028 통합형 세트는 번호 규칙이 다르다
   let num = keyNum;
-  if (printedNum != null && printedNum !== keyNum && qtypeFromNum_(printedNum)) {
+  if (printedNum != null && printedNum !== keyNum && qtypeFromNum_(printedNum, rules)) {
     num = printedNum; warn.push('NUM_MISMATCH(key ' + keyNum + ' / printed ' + printedNum + ')');
   }
-  const expected = qtypeFromNum_(num);
+  const expected = qtypeFromNum_(num, rules);
   if (!expected) warn.push('NUM_OUT_OF_RANGE');
   return { subject, keyNum, printedNum, num, expected, warn };
 }
