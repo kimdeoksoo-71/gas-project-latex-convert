@@ -10,6 +10,7 @@
  *     - A열 key 의 번호와 B열 첫머리 인쇄 번호를 비교, 다르면 인쇄 번호 우선 + NUM_MISMATCH 경고
  *     - 공통 1~15 / 선택 23~28 → 객관식,  16~22 / 29~30 → 단답형  (DSN.QTYPE_RULES)
  *     - 2028 통합형 세트(key 가 두 자리 학년도 27 이상으로 시작)는 1~21 객관식 / 22~30 단답형  (DSN.QTYPE_RULES_2028 · 2026-11-17)
+ *       key 에 학년도가 없어도 세트 구성이 2028 서킷 틀(공통 14~20 · 확통 26~28)이면 같은 규칙  (DSN.FRAME_2028_CIRCUIT · 2026-11-18)
  *     - key 가 규칙에 안 맞으면 선판정 없이 현행 방식(파싱 결과만)으로 판정
  *  2) 객관식이면 선지 토크나이저(parseMcqFromRaw_)로 5개 선지 추출
  *     - 마커 (1)~(5), （1）~（5）, ①~⑤, \textcircled{n} 을 모두 인정, 한 문항 안 혼용 허용
@@ -73,9 +74,53 @@ DSN.QTYPE_RULES_2028 = [
 // 통합형 세트의 key: 두 자리 학년도 27 이상으로 시작 — `27CXTB07회 (261116)_…` · `27모의X02_…` · `27서킷K04_…`.
 //   옛 체제의 `26모의X…`·`25서킷X…`(두 자리 26 이하), `2027강대모의고사X17회…`·`[2027]강대…`(네 자리 연도)는 해당하지 않는다.
 const KEY_2028_RE = /^\s*(\d{2})(?!\d)/;
+// 2028학년도 서킷 틀(2026-11-18): key 에 학년도가 없는 서킷 세트도 통합형으로 본다 — `서킷더베스트(07회)_261117` 런(7402~7411)이
+//   옛 규칙으로 판정돼 26~28 정규화 실패 3 · 정답 충돌 2 로 멈췄다. 이름만으로는 못 가른다(`서킷더베스트07회`(4240~)·
+//   `260211 서킷더베스트(06회)`(4386~)는 옛 12문항 틀). 그래서 **세트 구성**으로 가른다:
+//   세트(key 에서 `_과목NN` 을 뗀 앞부분)의 문항이 모두 이 틀 안에 있고 FRAME_2028_MIN 개 이상이면 통합형.
+//   옛 서킷 틀(12·14문항)은 1공통09~13·21·미적을 담으므로 걸리지 않는다(Data_DS 237세트 중 이 틀은 27CXTB07회·서킷더베스트(07회) 2세트뿐).
+DSN.FRAME_2028_CIRCUIT = ['1공통14', '1공통15', '1공통16', '1공통17', '1공통18', '1공통19', '1공통20', '3확통26', '3확통27', '3확통28'];
+DSN.FRAME_2028_MIN = 6;
+const KEY_SET_RE = /^(.*?)_?([1345](?:공통|확통|미적|기하)\d{2})\s*$/;
+let DS_SETS_2028_ = null;   // { 세트명: true } — 실행마다 Data_DS A열로 만든다 (ds_loadSets2028_)
+
+/** key → { set, code } (예: '서킷더베스트(07회)_261117_1공통16' → set '서킷더베스트(07회)_261117', code '1공통16') */
+function ds_splitKey_(key) {
+  const m = String(key ?? '').trim().match(KEY_SET_RE);
+  return (m && m[1].trim()) ? { set: m[1].trim(), code: m[2] } : null;
+}
+/** key 목록 → 2028 서킷 틀에 드는 세트 { 세트명: true }  (순수 함수) */
+function ds_sets2028FromKeys_(keys) {
+  const frame = new Set(DSN.FRAME_2028_CIRCUIT), bySet = {};
+  (keys || []).forEach(k => {
+    const s = ds_splitKey_(k); if (!s) return;
+    const e = bySet[s.set] || (bySet[s.set] = { codes: new Set(), out: false });
+    e.codes.add(s.code); if (!frame.has(s.code)) e.out = true;
+  });
+  const out = {};
+  Object.keys(bySet).forEach(n => { const e = bySet[n]; if (!e.out && e.codes.size >= DSN.FRAME_2028_MIN) out[n] = true; });
+  return out;
+}
+/** Data_DS A열을 읽어 DS_SETS_2028_ 를 새로 만든다. sh 가 없으면 활성 파일의 Data_DS. 실패해도 판정은 key 규칙으로 계속 */
+function ds_loadSets2028_(sh) {
+  try {
+    if (!sh) { if (typeof SpreadsheetApp === 'undefined') return DS_SETS_2028_; sh = SpreadsheetApp.getActive().getSheetByName(DSN.SHEET); }
+    if (!sh) return DS_SETS_2028_;
+    const last = sh.getLastRow();
+    const keys = last >= 2 ? sh.getRange(2, DSN.COL.key, last - 1, 1).getValues().map(r => String(r[0] || '')) : [];
+    DS_SETS_2028_ = ds_sets2028FromKeys_(keys);
+  } catch (_) {}
+  return DS_SETS_2028_;
+}
+/** 시험용: 세트 표를 직접 넣는다 */
+function ds_setSets2028_(map) { DS_SETS_2028_ = map || {}; }
+
 function ds_qtypeRules_(key) {
   const m = String(key ?? '').match(KEY_2028_RE);
-  return (m && Number(m[1]) >= 27) ? DSN.QTYPE_RULES_2028 : DSN.QTYPE_RULES;
+  if (m && Number(m[1]) >= 27) return DSN.QTYPE_RULES_2028;
+  if (DS_SETS_2028_ === null) ds_loadSets2028_();
+  const s = ds_splitKey_(key);
+  return (s && DS_SETS_2028_ && DS_SETS_2028_[s.set]) ? DSN.QTYPE_RULES_2028 : DSN.QTYPE_RULES;
 }
 
 function qtypeFromNum_(num, rules) {
@@ -376,6 +421,7 @@ function ds_normalizeRow_(sh, row, opts) {
 /** 여러 행 처리 + 통계 (UI 없음). Pipeline 과 메뉴가 공용 */
 function ds_normalizeRows_(sh, rows, opts) {
   const st = { ok: 0, fail: 0, failRows: [], review: [], warnRows: {}, warnCount: {} };
+  ds_loadSets2028_(sh);   // 2028 서킷 틀 세트 표를 이번 호출 시점의 A열로 (같은 실행에서 방금 보낸 행도 든다)
   for (const row of rows) {
     try {
       const r = ds_normalizeRow_(sh, row, opts);
