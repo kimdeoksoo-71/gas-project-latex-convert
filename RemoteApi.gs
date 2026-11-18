@@ -15,7 +15,7 @@
  */
 
 const RAPI = {
-  VERSION:    'latex-1.2.2',   // 1.2.2 = 2028 서킷 틀(세트 구성: 공통 14~20 · 확통 26~28)도 통합형 번호 규칙 / 1.2.1 = 2028 통합형(27~) 번호 규칙·renorm 명령 / 1.2.0 = postfix 단계(PostProcess.gs)·식 번호 원문자 정본(MathpixTagNormalize 반대 방향)·정규화 첫 줄 \section* · 이하 이력 — 패치 14: 그림 URL \& 복원(2026-11-08) · 패치 13 (대량 변환 v4): tick / resume / sheetcheck 추가, start 는 트리거를 걸지 않는다
+  VERSION:    'latex-1.2.3',   // 1.2.3 = 정답 추출: 키워드와 다른 줄의 값은 그 줄이 정답 하나뿐일 때만(7406 "정답⏎2 이상의…") / 1.2.2 = 2028 서킷 틀(세트 구성: 공통 14~20 · 확통 26~28)도 통합형 번호 규칙 / 1.2.1 = 2028 통합형(27~) 번호 규칙·renorm 명령 / 1.2.0 = postfix 단계(PostProcess.gs)·식 번호 원문자 정본(MathpixTagNormalize 반대 방향)·정규화 첫 줄 \section* · 이하 이력 — 패치 14: 그림 URL \& 복원(2026-11-08) · 패치 13 (대량 변환 v4): tick / resume / sheetcheck 추가, start 는 트리거를 걸지 않는다
   PROJECT:    'latex-convert',
   TOKEN_PROP: 'REMOTE_TOKEN',
   LOG_TAIL:   20,

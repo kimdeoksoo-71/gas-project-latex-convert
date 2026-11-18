@@ -332,13 +332,16 @@ function ds_extractAnswer_(text) {
   if (ans) return ans;
 
   // 같은 줄이 비어 있거나(번호만) 정답이 없으면 → 바로 다음 줄
+  //   2026-11-18: 키워드 없는 다음 줄·키워드만 있는 줄의 다음 줄은 **그 줄이 정답 하나뿐일 때만** 인정한다(ds_bareAnswerLine_).
+  //   서킷더베스트(07회) 7406행 "18.⏎정답⏎2 이상의 자연수 n 에 대하여…" — 정답 칸이 빈 해설에서 본문 첫 숫자 2 를 정답으로 읽었다.
   if (lines.length > 1) {
-    ans = ds_matchAnswerAtStart_(lines[1], first === '');
+    ans = DLDS_KW_RE.test(lines[1]) ? ds_matchAnswerAtStart_(lines[1], false)
+        : (first === '' ? ds_bareAnswerLine_(lines[1]) : null);
     if (ans) return ans;
-    // "정답" 키워드가 있으면 그 다음 줄까지 허용 (예: "정답\n②")
+    // "정답" 키워드만 있는 줄이면 그 다음 줄까지 허용 (예: "정답\n②")
     if (DLDS_KW_ONLY_RE.test(first) || DLDS_KW_ONLY_RE.test(lines[1])) {
       const nxt = /^[\[【(]?\s*(?:정답|답)/.test(first) ? lines[1] : (lines[2] || '');
-      ans = ds_matchToken_(nxt, true);
+      ans = ds_bareAnswerLine_(nxt);
       if (ans) return ans;
     }
   }
@@ -350,22 +353,32 @@ function ds_extractAnswer_(text) {
     const lastLine = lines[lines.length - 1];
     ans = ds_matchAnswerAtStart_(lastLine, false);
     if (ans) return ans;
-    const bare = lastLine.replace(/^\$+\s*|\s*\$+$/g, '').replace(/^\\\(\s*|\s*\\\)$/g, '').trim();
-    if (/^(?:[①②③④⑤]|\\textcircled\s*\{\s*[1-5]\s*\}|\(\s*[1-5]\s*\)|\d{1,3})\s*[.]?$/.test(bare)) {
-      ans = ds_matchToken_(bare, true);
-      if (ans) return ans;
-    }
+    ans = ds_bareAnswerLine_(lastLine);
+    if (ans) return ans;
   }
 
   // 3) 전체에서 '정답' 키워드 패턴 마지막 검색 (fallback)
-  const kwRe = /(?:정답|답)(?:은|는|이)?\s*[)\]】]?\s*[:：|｜]?\s*(\$?(?:[①②③④⑤]|\\textcircled\s*\{\s*[1-5]\s*\}|\([1-5]\)|\d{1,3})\$?)(?![\d\w가-힣%]|\.\d)/g;
-  let m, last = null;
+  //   2026-11-18: 키워드와 값 사이에 줄바꿈이 있으면(예전 `\s*` 가 줄을 넘었다) 값이 그 줄 전부일 때만 인정 — 7406행
+  const kwRe = /(?:정답|답)(?:은|는|이)?[ \t]*[)\]】]?[ \t]*[:：|｜]?[ \t]*(\$?(?:[①②③④⑤]|\\textcircled\s*\{\s*[1-5]\s*\}|\([1-5]\)|\d{1,3})\$?)(?![\d\w가-힣%]|\.\d)/g;
+  const kwEndRe = /(?:정답|답)(?:은|는|이)?[ \t]*[)\]】]?[ \t]*[:：|｜]?[ \t]*$/;
+  let m, last = null, lastAt = -1;
   const whole = lines.join('\n');
-  while ((m = kwRe.exec(whole)) !== null) last = m[1];
-  if (last) {
-    const t = ds_matchToken_(last, true);
-    if (t) return t;
+  while ((m = kwRe.exec(whole)) !== null) { last = ds_matchToken_(m[1], true); lastAt = m.index; }
+  let pos = 0;
+  for (let i = 0; i < lines.length - 1; i++) {               // "…정답은⏎②" — 키워드로 끝나는 줄 + 정답 하나뿐인 다음 줄
+    if (kwEndRe.test(lines[i]) && pos > lastAt) {
+      const t = ds_bareAnswerLine_(lines[i + 1]);
+      if (t) { last = t; lastAt = pos; }
+    }
+    pos += lines[i].length + 1;
   }
+  return last || null;
+}
+
+/** 줄 전체가 정답 하나뿐이면(②, (2), 32, $32$, \textcircled{2}, 끝 마침표 허용) 그 토큰, 아니면 null */
+function ds_bareAnswerLine_(line) {
+  const bare = String(line ?? '').trim().replace(/^\$+\s*|\s*\$+$/g, '').replace(/^\\\(\s*|\s*\\\)$/g, '').trim();
+  if (/^(?:[①②③④⑤]|\\textcircled\s*\{\s*[1-5]\s*\}|\(\s*[1-5]\s*\)|\d{1,3})\s*[.]?$/.test(bare)) return ds_matchToken_(bare, true);
   return null;
 }
 
