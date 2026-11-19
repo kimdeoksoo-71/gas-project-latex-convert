@@ -65,6 +65,10 @@ const DLDS_CIRCLED = ['①', '②', '③', '④', '⑤'];
 // 줄 시작 정답 키워드: 정답 : / 정답) / [정답] / 【정답】 / 답 : / 정답 | (패치 6: 세로줄 | ｜ 구분자, 26K28)
 const DLDS_KW_RE      = /^[\[【(]?\s*(?:정답|답)\s*[\]】)]?\s*[:：)|｜]?\s*/;
 const DLDS_KW_ONLY_RE = /^[\[【(]?\s*(?:정답|답)\s*[\]】)]?\s*[:：|｜]?\s*$/;   // 키워드만 있는 줄 → 정답은 다음 줄
+// renual P3 (부록 B-6, CRUX 해설 머리): "01 답 ②" · "01 기출 CHECK 답 ②" 의 번호(+기출 CHECK) 부분 / 그 부분만 있는 줄
+const DLDS_HEAD_RE      = /^\d{1,3}\s+(?:기출\s*CHECK\s+)?/i;
+const DLDS_HEAD_KW_RE   = /^\d{1,3}\s+(?:기출\s*CHECK\s+)?[\[【(]?\s*(?:정답|답)\s*[\]】)]?\s*[:：)|｜]?\s*(?:[①②③④⑤]|\d)/i;
+const DLDS_HEAD_ONLY_RE = /^\d{1,2}$|^\d{1,3}\s*기출\s*CHECK$/i;
 
 /* =================================================
  * [명령 1] Data_Latex → Data_DS
@@ -144,7 +148,7 @@ function dl_sendPairsToDataDS() {
     .forEach(([key, p]) => {
       if (existing.has(nfc_(key))) { skippedDup.push(key); return; }
       if (p.problem === null && p.solution !== null) { onlySolution.push(key); return; } // 해설만 있으면 보내지 않음
-      if (p.solution === null) onlyProblem.push(key);
+      if (p.solution === null) onlyProblem.push(key);   // 메뉴 경로는 문제만 행도 보낸다. 러너 경로(pl_stageSend_)는 Sets 해설 '없음' 세트만 (renual P3)
       out.push([key, p.problem || '', p.solution || '']);
     });
 
@@ -254,10 +258,17 @@ function ds_fillGivenAnswer_byRowInput() {
   ui.alert('완료', msg, ui.ButtonSet.OK);
 }
 
-/** 여러 행에 대해 D를 채우고 통계 반환 */
-function ds_fillGivenAnswerRows_(sh, rows) {
-  const stat = { ok: 0, miss: [], conflict: [], skipped: 0 };
+/**
+ * 여러 행에 대해 D를 채우고 통계 반환
+ *   renual P3(§5): 정답 우선순위 — ① Sets 정답출처가 정답표 계열(해설정답표·문제지정답표)이면 Sets answers 열(키의 `0통합07` 부분)
+ *   → ② 없으면 해설 본문 추출(ds_extractAnswer_) → 정답출처 '없음'이면 공란(noSource 로 센다 — miss 아님).
+ *   Sets 행이 없는 세트는 키로 추론(해설본문)하므로 지금과 같다. sets 를 넘기지 않으면 시트에서 읽는다(시험에선 {} 를 넘긴다).
+ *   stat: ok(=표 fromTable + 본문) · miss · conflict · skipped(이미 값 있음) · noSource · fromTable
+ */
+function ds_fillGivenAnswerRows_(sh, rows, sets) {
+  const stat = { ok: 0, miss: [], conflict: [], skipped: 0, noSource: 0, fromTable: 0 };
   if (!rows.length) return stat;
+  if (!sets) { try { sets = sets_readAll_(sh.getParent()).byName; } catch (_) { sets = {}; } }
 
   const minR = Math.min(...rows), maxR = Math.max(...rows);
   const block = sh.getRange(minR, 1, maxR - minR + 1, DLDS.DST.type).getValues();
@@ -267,12 +278,24 @@ function ds_fillGivenAnswerRows_(sh, rows) {
   for (let r = minR; r <= maxR; r++) {
     if (!rowSet.has(r)) continue;
     const i = r - minR;
+    const key      = String(block[i][DLDS.DST.key - 1] || '');
     const solution = String(block[i][DLDS.DST.solution - 1] || '');
     const current  = String(block[i][DLDS.DST.answer - 1] || '').trim();
     const type     = String(block[i][DLDS.DST.type - 1] || '').trim();
 
     if (current && !DLDS.OVERWRITE_ANSWER) { stat.skipped++; continue; }
-    if (!solution.trim()) { stat.miss.push(r); continue; }
+
+    const fk = sets_forKey_(sets, key);
+    const src = fk.profile['정답출처'];
+    if (src === '없음') { stat.noSource++; continue; }
+    let tableBad = false;
+    if (SETS.ANS_FROM_TABLE.indexOf(src) >= 0 && fk.code && fk.answers[fk.code] !== undefined) {
+      const tf = sets_answerToFound_(fk.answers[fk.code]);
+      const tv = tf ? ds_formatAnswer_(tf, type) : null;
+      if (tv !== null) { dOut[i][0] = tv; stat.ok++; stat.fromTable++; continue; }
+      tableBad = true;                          // 표 값이 형식 밖·유형 불일치 → 해설 본문으로 넘어간다(본문도 없으면 conflict)
+    }
+    if (!solution.trim()) { (tableBad ? stat.conflict : stat.miss).push(r); continue; }
 
     const found = ds_extractAnswer_(solution); // { kind:'circled'|'int', value:number } | null
     if (!found) { dOut[i][0] = current; stat.miss.push(r); continue; }
@@ -322,8 +345,12 @@ function ds_extractAnswer_(text) {
   let tailIdx = 0;
   if (numRe.test(first)) {
     first = first.replace(numRe, '').trim();
-  } else if (/^\d{1,2}$/.test(first) && lines.length > 1 && DLDS_KW_RE.test(lines[1])) {
+  } else if (DLDS_HEAD_KW_RE.test(first)) {
+    // renual P3 (부록 B-6, CRUX): 해설 머리 "01 답 ②" · "01 기출 CHECK 답 12" — 번호(·기출 CHECK) 뒤 같은 줄에 답 키워드
+    first = first.replace(DLDS_HEAD_RE, '').trim();
+  } else if (DLDS_HEAD_ONLY_RE.test(first) && lines.length > 1 && DLDS_KW_RE.test(lines[1])) {
     // 패치 6 (26K28): 마침표 없는 번호 단독줄 "10" 뒤에 "정답 | ②" → 번호다. (예전엔 10을 정답으로 읽었다)
+    //   renual P3: "01 기출 CHECK" 단독 줄도 같은 머리로 본다
     first = '';
   }
 

@@ -15,7 +15,7 @@
  */
 
 const RAPI = {
-  VERSION:    'latex-1.2.3',   // 1.2.3 = 정답 추출: 키워드와 다른 줄의 값은 그 줄이 정답 하나뿐일 때만(7406 "정답⏎2 이상의…") / 1.2.2 = 2028 서킷 틀(세트 구성: 공통 14~20 · 확통 26~28)도 통합형 번호 규칙 / 1.2.1 = 2028 통합형(27~) 번호 규칙·renorm 명령 / 1.2.0 = postfix 단계(PostProcess.gs)·식 번호 원문자 정본(MathpixTagNormalize 반대 방향)·정규화 첫 줄 \section* · 이하 이력 — 패치 14: 그림 URL \& 복원(2026-11-08) · 패치 13 (대량 변환 v4): tick / resume / sheetcheck 추가, start 는 트리거를 걸지 않는다
+  VERSION:    'latex-1.3.0',   // 1.3.0 = renual P3(2026-11-19): 키 규칙 0통합·9순번·9기출 · Sets 시트(_set.json·start profile) · 정답표 우선 · 해설 없음 세트 문제만 행 · status sets · imagecheck sets / 1.2.3 = 정답 추출: 키워드와 다른 줄의 값은 그 줄이 정답 하나뿐일 때만(7406 "정답⏎2 이상의…") / 1.2.2 = 2028 서킷 틀(세트 구성: 공통 14~20 · 확통 26~28)도 통합형 번호 규칙 / 1.2.1 = 2028 통합형(27~) 번호 규칙·renorm 명령 / 1.2.0 = postfix 단계(PostProcess.gs)·식 번호 원문자 정본(MathpixTagNormalize 반대 방향)·정규화 첫 줄 \section* · 이하 이력 — 패치 14: 그림 URL \& 복원(2026-11-08) · 패치 13 (대량 변환 v4): tick / resume / sheetcheck 추가, start 는 트리거를 걸지 않는다
   PROJECT:    'latex-convert',
   TOKEN_PROP: 'REMOTE_TOKEN',
   LOG_TAIL:   20,
@@ -174,7 +174,11 @@ function rapi_start_(p) {
   const keywords = rapi_keywords_(p.keywords);
   if (!keywords.length) return { ok: false, reason: 'keywords 파라미터가 비어 있습니다.' };
   const driver = p.driver === 'pump' ? 'pump' : 'trigger';
+  // renual P3(§5): profile = "형식,구성,교육과정,양식,해설,정답출처" 또는 JSON. Sets 행이 없는 세트만 이 값으로 만든다(있으면 Sets 우선)
+  const prof = sets_parseProfileArg_(p.profile);
+  if (prof && !prof.ok) return { ok: false, reason: 'profile 오류: ' + prof.errors.join(' / ') };
   return pipeline_startCore_(keywords, {
+    profile: prof ? prof.profile : null,
     force: p.force === '1',
     driver: driver,
     until: p.until || (driver === 'pump' ? 'latex' : 'done'),
@@ -192,7 +196,7 @@ function rapi_start_(p) {
  * 이런 상태를 비용을 쓰기 전에 잡는다.
  *
  * 응답: { ok, folderId, scanned, newestCreated(ISO), now(ISO),
- *         byKeyword: { kw: { problem:[문항], solution:[문항], png, pdf, other:[이름…≤5] } },
+ *         byKeyword: { kw: { problem:[문항], solution:[문항], png, pdf, other:[이름…≤5], sets:[_set.json 이름] } },   (sets: renual P3)
  *         duplicates: n, dupSamples:[이름…≤10] }
  *   folderId는 러너가 설정의 고정 ID와 대조한다 — 동명 폴더가 생기면 search가 엉뚱한 폴더를 쓰기 때문.
  */
@@ -200,7 +204,7 @@ function rapi_imagecheck_(p) {
   const keywords = rapi_keywords_(p.keywords);
   if (!keywords.length) return { ok: false, reason: 'keywords 파라미터가 비어 있습니다.' };
   const folder = getFolderByPath(PL.SEARCH_FOLDER);
-  const kws = keywords.map(k => ({ k: k, l: nfc_(k).toLowerCase(), prob: {}, sol: {}, png: 0, pdf: 0, other: [] }));
+  const kws = keywords.map(k => ({ k: k, l: nfc_(k).toLowerCase(), prob: {}, sol: {}, png: 0, pdf: 0, other: [], sets: [] }));
   const ITEM_RE = /_(문제|해설)_(.+?)(?:_c\d+)?\.(png|pdf)$/i;
   const seen = {}, dupSamples = [];
   let duplicates = 0, scanned = 0, newest = 0;
@@ -216,7 +220,9 @@ function rapi_imagecheck_(p) {
     newest = Math.max(newest, f.getDateCreated().getTime());
     if (seen[name]) { duplicates++; if (dupSamples.length < 10) dupSamples.push(name); } else seen[name] = true;
     const m = name.match(ITEM_RE);
+    const isSet = /_set\.json$/i.test(name);                // renual P3: 세트 사이드카는 '이름 형식 밖'이 아니다
     hits.forEach(o => {
+      if (isSet) { o.sets.push(name); return; }
       if (!m) { if (o.other.length < 5) o.other.push(name); return; }
       if (m[3].toLowerCase() === 'png') o.png++; else o.pdf++;
       (m[1] === '문제' ? o.prob : o.sol)[m[2]] = true;
@@ -225,7 +231,7 @@ function rapi_imagecheck_(p) {
   const byKeyword = {};
   kws.forEach(o => {
     byKeyword[o.k] = { problem: Object.keys(o.prob).sort(), solution: Object.keys(o.sol).sort(),
-                       png: o.png, pdf: o.pdf, other: o.other };
+                       png: o.png, pdf: o.pdf, other: o.other, sets: o.sets };
   });
   return { ok: true, folderId: folder.getId(), scanned: scanned,
            newestCreated: newest ? new Date(newest).toISOString() : null, now: new Date().toISOString(),
@@ -242,9 +248,26 @@ function rapi_status_() {
     progress: pl_progress_(st),                 // 패치 13 A-06 (tick 과 같은 객체)
     archived: pl_archivedOk_(st),               // 패치 13 D20
     logTail: rapi_logTail_(RAPI.LOG_TAIL),
+    sets:    rapi_setsSummary_(st),                // renual P3: 이번 런 키워드의 Sets 행 (러너가 런 프로파일과 대조)
     hasTick: ScriptApp.getProjectTriggers().some(t => t.getHandlerFunction() === PL.TICK_FN),   // driver=trigger 면 true 가 정상, pump 면 false
     at:      new Date().toISOString(),
   };
+}
+
+/**
+ * renual P3: 런 키워드(부분 일치, NFC·소문자)에 드는 Sets 행 요약 — [{ name, profile:"신,30,2022,-,있음,해설본문", answers:n, lock }]
+ * 실패해도 status 는 돌려준다(null).
+ */
+function rapi_setsSummary_(st) {
+  try {
+    if (!st || !st.keywords) return null;
+    const kws = st.keywords.map(k => nfc_(k).toLowerCase());
+    const all = sets_readAll_(SpreadsheetApp.getActive()).byName;
+    return Object.keys(all).filter(n => kws.some(k => n.toLowerCase().indexOf(k) !== -1)).slice(0, 30).map(n => {
+      const r = all[n];
+      return { name: n, profile: SETS.FIELDS.map(f => r.profile[f] || '').join(','), answers: Object.keys(r.answers || {}).length, lock: r.lock };
+    });
+  } catch (_) { return null; }
 }
 
 /* =================================================

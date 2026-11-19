@@ -192,7 +192,8 @@ function pipeline_startCore_(keywords, opts) {
   const now = Date.now();
   const st = {
     stage: 'clear', keywords: keywords, startedAt: new Date(now).toISOString(), runId: '',
-    opts: { until: until, fig: opts.fig !== false, skipExisting: opts.skipExisting !== false, driver: driver },
+    opts: { until: until, fig: opts.fig !== false, skipExisting: opts.skipExisting !== false, driver: driver,
+            profile: opts.profile || null },                                   // renual P3: 러너 프로파일(Sets 행이 없는 세트용)
     ticks: 0, lastTickAt: 0, lastChangeAt: now, progress: 0,
     search: { n: {}, skipped: {}, data1Rows: 0 },
     latex: { ok: 0, err: 0, left: 0 },
@@ -206,7 +207,8 @@ function pipeline_startCore_(keywords, opts) {
   };
   st.runId = st.startedAt;
   pl_saveState_(st);
-  pl_log_(st, 'start', `키워드: ${keywords.join(' | ')} / driver=${driver} until=${until} fig=${st.opts.fig} skipExisting=${st.opts.skipExisting}`);
+  pl_log_(st, 'start', `키워드: ${keywords.join(' | ')} / driver=${driver} until=${until} fig=${st.opts.fig} skipExisting=${st.opts.skipExisting}` +
+    (st.opts.profile ? ` profile=${SETS.FIELDS.map(f => st.opts.profile[f]).join(',')}` : ''));
   return { ok: true, runId: st.runId, stage: st.stage };
 }
 
@@ -457,8 +459,10 @@ function pl_runStage_(st, deadline) {
       const dst = ss.getSheetByName(PL.DST_SHEET);
       const rows = pl_range_(st.ds.writeStart, st.ds.writeEnd);
       const s = ds_fillGivenAnswerRows_(dst, rows);
-      st.ans = { ok: s.ok, miss: pl_slim_(st, 'ans.miss', s.miss), conflict: pl_slim_(st, 'ans.conflict', s.conflict), skipped: s.skipped };
-      pl_log_(st, 'answer', `정답 성공 ${s.ok}, 미검출 ${s.miss.length}, 유형 불일치 ${s.conflict.length}`);
+      st.ans = { ok: s.ok, miss: pl_slim_(st, 'ans.miss', s.miss), conflict: pl_slim_(st, 'ans.conflict', s.conflict), skipped: s.skipped,
+                 noSource: s.noSource, fromTable: s.fromTable };   // renual P3: 정답표(Sets answers)에서 · 정답출처 없음
+      pl_log_(st, 'answer', `정답 성공 ${s.ok}` + (s.fromTable ? ` (정답표 ${s.fromTable})` : '') + `, 미검출 ${s.miss.length}, 유형 불일치 ${s.conflict.length}` +
+        (s.noSource ? `, 정답출처 없음 ${s.noSource}` : ''));
       st.stage = 'postfix'; return 'next';
     }
 
@@ -504,6 +508,7 @@ function pl_stageSearch_(st, ss, deadline) {
 
   const existing = st.opts.skipExisting ? pl_dsKeySet_(ss) : null;
   const skippedAll = [];
+  const setNames = new Set();                      // renual P3: 이번 런에 들어온 세트명 (Sets 행 만들기용)
   let written = 0;
   for (const kw of st.keywords) {
     if (st.search.n[kw] !== undefined) continue;   // 재개 시 중복 방지
@@ -516,6 +521,7 @@ function pl_stageSearch_(st, ss, deadline) {
       }
       seen.add(p[0]); return true;
     });
+    pairs.forEach(p => { const pf = dlds_parseFilename_(p[0]); const sp = pf && ds_splitKey_(pf.key); if (sp) setNames.add(nfc_(sp.set)); });
     pairs.sort((a, b) => a[0].localeCompare(b[0], 'ko', { sensitivity: 'base', numeric: true }));
     if (pairs.length) {
       const startRow = Math.max(2, sh.getLastRow() + 1);
@@ -526,6 +532,7 @@ function pl_stageSearch_(st, ss, deadline) {
     pl_saveState_(st);
     if (Date.now() > deadline) pl_log_(st, 'search', '예산 초과 — 순회는 중단할 수 없어 계속 진행');
   }
+  pl_syncSets_(st, ss, folder, setNames);           // renual P3: _set.json → Sets (없으면 런 프로파일로 행 만들기)
   SpreadsheetApp.flush();   // Data_Latex!A 가 Data1 을 참조하는 수식이면 여기서 반영
   if (skippedAll.length) pl_report_(st, 'search.skipped', skippedAll.length, skippedAll.join(', '));
   st.search.data1Rows = written;
@@ -542,6 +549,48 @@ function pl_stageSearch_(st, ss, deadline) {
     throw new Error(`Data_Latex A열 행 수(${srcRows})가 Data1 기록 행 수(${written})와 다릅니다 — 시트 최대 행·A2 수식 확인 (sheetcheck)`);
   }
   st.stage = 'latex'; return 'next';
+}
+
+/**
+ * renual P3(§2.3·§5, X-01): IMAGE_DS 의 `<시험지명>_set.json`(키워드를 담은 것)을 읽어 `Sets` 에 통째로 upsert 하고,
+ * 사이드카가 없는 이번 런의 세트는 — Sets 행이 있으면 그대로 두고(앞 런의 answers 재사용) — 없으면 러너가 start 로 넘긴
+ * 프로파일(st.opts.profile)로 행을 만든다. 프로파일도 없으면 만들지 않는다(읽는 곳이 키로 추론).
+ * 실패(JSON 깨짐·셀 한도 초과·잠금)는 런을 멈추지 않고 보고(search.sets)와 로그로 알린다 — 정답 비율 검사가 뒤에서 잡는다.
+ */
+function pl_syncSets_(st, ss, folder, setNames) {
+  const kws = st.keywords.map(k => nfc_(k).toLowerCase());
+  const all = sets_readAll_(ss);
+  const res = { sidecar: 0, inserted: 0, updated: 0, locked: 0, fromRunner: 0, errors: [] };
+  const done = new Set();
+  const files = folder.getFiles();
+  while (files.hasNext()) {
+    const f = files.next();
+    const name = nfc_(f.getName() || '');
+    const lower = name.toLowerCase();
+    if (!/_set\.json$/i.test(name) || !kws.some(k => lower.indexOf(k) !== -1)) continue;
+    res.sidecar++;
+    let sc;
+    try { sc = sets_parseSidecar_(f.getBlob().getDataAsString('UTF-8')); } catch (e) { sc = { ok: false, errors: [String(e.message || e)] }; }
+    const stem = name.replace(/_set\.json$/i, '');
+    if (sc.ok && sc.exam !== stem) sc = { ok: false, errors: [`exam '${sc.exam}' ≠ 파일 이름 '${stem}'`] };
+    if (!sc.ok) { res.errors.push(`${name}: ${sc.errors.slice(0, 3).join(' / ')}`); continue; }
+    const r = sets_upsert_(ss, sc, 'search ' + (sc.engine || ''), all);
+    if (r === 'inserted') res.inserted++; else if (r === 'updated') res.updated++; else if (r === 'locked') res.locked++;
+    else res.errors.push(`${name}: ${r}`);
+    done.add(sc.exam);
+  }
+  if (st.opts.profile) {
+    setNames.forEach(n => {
+      if (done.has(n) || all.byName[n]) return;
+      const r = sets_upsert_(ss, { exam: n, profile: st.opts.profile, warnings: ['사이드카 없음 — 러너 프로파일'] }, 'runner start', all);
+      if (r === 'inserted') res.fromRunner++; else res.errors.push(`${n}: ${r}`);
+    });
+  }
+  st.search.sets = { sidecar: res.sidecar, inserted: res.inserted, updated: res.updated, locked: res.locked, fromRunner: res.fromRunner,
+                     errors: pl_slim_(st, 'search.sets.errors', res.errors) };
+  if (res.sidecar || res.fromRunner || res.errors.length)
+    pl_log_(st, 'search', `Sets: 사이드카 ${res.sidecar}개 (새 행 ${res.inserted} · 갱신 ${res.updated} · 잠금 ${res.locked})` +
+      (res.fromRunner ? ` · 러너 프로파일 ${res.fromRunner}행` : '') + (res.errors.length ? ` · 실패 ${res.errors.length}: ${res.errors[0]}` : ''));
 }
 
 /** Data_DS A열 key 집합 (NFC) */
@@ -622,12 +671,18 @@ function pl_stageSend_(st, ss, deadline) {
   }
 
   const existing = pl_dsKeySet_(ss);                                           // 이미 쓴 묶음도 여기서 걸러진다 (재개)
+  const setsAll = sets_readAll_(ss).byName;                                    // renual P3: 해설 없음 세트는 문제만 행을 보낸다
   const rowsOut = [], skippedDup = [], incomplete = [];
+  let problemOnly = 0;
   Array.from(pairs.entries()).sort((a, b) => a[1].order - b[1].order).forEach(([key, p]) => {
     if (existing.has(nfc_(key))) { skippedDup.push(key); return; }
+    if (p.problem !== null && p.solution === null && sets_forKey_(setsAll, key).profile['해설'] === '없음') {
+      rowsOut.push([key, p.problem, '']); problemOnly++; return;               // 해설 '있음'(또는 Sets 행 없음)이면 아래처럼 보류 — D19 그대로
+    }
     if (p.problem === null || p.solution === null) { incomplete.push(key + (p.problem === null ? '(문제 없음)' : '(해설 없음)')); return; }   // D19
     rowsOut.push([key, p.problem, p.solution]);
   });
+  if (problemOnly && !st.ds.cursor) pl_log_(st, 'send', `해설 없음 세트 — 문제만 행 ${problemOnly}개 (C 공란)`);
 
   if (!st.ds.cursor) {                                                         // 첫 회차: 집계 기록
     st.ds.total = rowsOut.length + st.ds.count;
@@ -763,17 +818,25 @@ function pl_sheetcheck_(keywords) {
     const last = dlds_lastDataRow_(dst, 1);
     out.dataDs.lastRow = last;
     const keys = (last >= 2) ? dst.getRange(2, 1, last - 1, 1).getValues().map(r => nfc_(String(r[0] || '')).toLowerCase()) : [];
-    const ex = {}, emptySol = {};
+    const ex = {}, emptySol = {}, emptySolNoSol = {};
+    let setsAll = null;
     (keywords || []).forEach(kw => {
       const k = nfc_(kw).toLowerCase();
       const rows = []; keys.forEach((x, i) => { if (x.indexOf(k) !== -1) rows.push(i + 2); });
       ex[kw] = rows.length;
-      let empty = 0;                                                        // R1 s11: 그중 C(해설) 빈 행 — 옛 onlyProblem 전송 흔적, skipExisting 으로 영구 제외됨
-      rows.forEach(r => { if (!String(dst.getRange(r, DLDS.DST.solution).getValue() || '').trim()) empty++; });
-      emptySol[kw] = empty;
+      let empty = 0, expected = 0;                                          // R1 s11: 그중 C(해설) 빈 행 — 옛 onlyProblem 전송 흔적, skipExisting 으로 영구 제외됨
+      rows.forEach(r => {
+        if (String(dst.getRange(r, DLDS.DST.solution).getValue() || '').trim()) return;
+        // renual P3(P2-4): Sets 해설 '없음' 세트의 빈 해설은 정상 → emptySolution 에서 빼고 따로 센다
+        if (setsAll === null) setsAll = sets_readAll_(ss).byName;
+        const key = String(dst.getRange(r, DLDS.DST.key).getValue() || '');
+        if (sets_forKey_(setsAll, key).profile['해설'] === '없음') expected++; else empty++;
+      });
+      emptySol[kw] = empty; emptySolNoSol[kw] = expected;
     });
     out.dataDs.existingKeys = ex;
     out.dataDs.emptySolution = emptySol;
+    out.dataDs.emptySolutionNoSol = emptySolNoSol;
     const sample = Math.min(100, Math.max(0, last - 1));
     if (sample > 0) {
       const bc = dst.getRange(last - sample + 1, 2, sample, 2).getValues();
