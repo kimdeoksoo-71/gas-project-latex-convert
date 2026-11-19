@@ -63,13 +63,14 @@ function jb_makeCanon_(yy, kind, nn) {
 
 /**
  * 파일키 → 표준 파일키. `cropKeyAliases_(key)[0]` + 뒤 부분(`1공통05`) 번호 2자리 패딩(안전망).
+ *   renual P3(2026-11-19): 과목 `통합`(`0통합07` → 매칭키 과목숫자 0)도 받는다. 문제집(`9순번`·`9기출`)·임의 세트는 형식 아님.
  * X 규칙이 아니거나 뒤 부분이 `<코드><과목><번호>`가 아니면 null("형식 아님").
  */
 function jb_canonKey_(key) {
   const k = jb_nfc_(key).trim();
   const i = k.indexOf('_'); if (i < 0) return null;
   const p = jb_parseExam_(k.slice(0, i)); if (!p) return null;
-  const m = k.slice(i + 1).match(/^(\d)(공통|확통|미적|기하)(\d{1,2})$/);
+  const m = k.slice(i + 1).match(/^(\d)(통합|공통|확통|미적|기하)(\d{1,2})$/);
   if (!m) return null;
   return `${p.canon}_${m[1]}${m[2]}${String(parseInt(m[3], 10)).padStart(2, '0')}`;
 }
@@ -97,7 +98,7 @@ function jb_normKey_(setId, subj, no) {
 /** 표준 파일키 `25X모의01_1공통05` → 매칭키 `25X모의01:1:5` */
 function jb_canonToMatchKey_(canon) {
   const i = canon.indexOf('_'); if (i < 0) return '';
-  const m = canon.slice(i + 1).match(/^(\d)(공통|확통|미적|기하)(\d{1,2})$/);
+  const m = canon.slice(i + 1).match(/^(\d)(통합|공통|확통|미적|기하)(\d{1,2})$/);
   if (!m) return '';
   return jb_normKey_(canon.slice(0, i), m[1], m[3]);
 }

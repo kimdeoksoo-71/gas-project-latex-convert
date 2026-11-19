@@ -60,7 +60,19 @@ DSN.QTYPE_RULES = [
   { from: 29, to: 30, type: 'short' }
 ];
 // A열 key 에서 과목코드+번호: "…_1공통07" / "…_4미적28"  (CroP 명명 규칙. 이 코드가 있어야 신체제 시험지로 간주)
-const KEY_RE = /[1345](공통|확통|미적|기하)(\d{2})\s*$/;
+//   2026-11-19 renual P3(§2.4): 공용 키 규칙 — 코드·이름 짝 `0통합 · 1공통 · 3확통 · 4미적 · 5기하`(번호 2자리) ·
+//   `9순번 · 9기출`(문제집, 번호 3자리). 짝이 어긋난 키(`3공통07`·`9순번01` 등)는 키로 보지 않는다.
+//   그룹: m[1] 코드(예 '0통합') · m[2] 번호 (2자리 코드) / m[3] 코드 · m[4] 번호 (문제집) → ds_keyCode_ 로 꺼내 쓴다.
+const KEY_CODE_SRC = '(?:0통합|1공통|3확통|4미적|5기하)\\d{2}|9(?:순번|기출)\\d{3}';
+const KEY_RE = /(?:(0통합|1공통|3확통|4미적|5기하)(\d{2})|(9순번|9기출)(\d{3}))\s*$/;
+
+/** key → { code:'0통합', digit:'0', subject:'통합', num:7, kind:'exam'|'book' } | null (순수 함수) */
+function ds_keyCode_(key) {
+  const m = String(key ?? '').match(KEY_RE);
+  if (!m) return null;
+  const code = m[1] || m[3], no = m[2] || m[4];
+  return { code: code, digit: code.charAt(0), subject: code.slice(1), num: Number(no), kind: m[3] ? 'book' : 'exam' };
+}
 // 본문 첫머리 인쇄 문항번호: "12." / "12)" / "\begin{itemize}\item[12.]"
 const PRINTED_NUM_RE = /^\s*(?:\\begin\{itemize\}\s*\\item\[\s*(\d{1,2})\s*\.?\s*\]|(\d{1,2})\s*[.)])/;
 
@@ -81,7 +93,7 @@ const KEY_2028_RE = /^\s*(\d{2})(?!\d)/;
 //   옛 서킷 틀(12·14문항)은 1공통09~13·21·미적을 담으므로 걸리지 않는다(Data_DS 237세트 중 이 틀은 27CXTB07회·서킷더베스트(07회) 2세트뿐).
 DSN.FRAME_2028_CIRCUIT = ['1공통14', '1공통15', '1공통16', '1공통17', '1공통18', '1공통19', '1공통20', '3확통26', '3확통27', '3확통28'];
 DSN.FRAME_2028_MIN = 6;
-const KEY_SET_RE = /^(.*?)_?([1345](?:공통|확통|미적|기하)\d{2})\s*$/;
+const KEY_SET_RE = new RegExp('^(.*?)_?(' + KEY_CODE_SRC + ')\\s*$');   // renual P3: 공용 키 규칙(KEY_CODE_SRC)
 let DS_SETS_2028_ = null;   // { 세트명: true } — 실행마다 Data_DS A열로 만든다 (ds_loadSets2028_)
 
 /** key → { set, code } (예: '서킷더베스트(07회)_261117_1공통16' → set '서킷더베스트(07회)_261117', code '1공통16') */
@@ -116,6 +128,8 @@ function ds_loadSets2028_(sh) {
 function ds_setSets2028_(map) { DS_SETS_2028_ = map || {}; }
 
 function ds_qtypeRules_(key) {
+  const kc = ds_keyCode_(key);                             // renual P3(§5): 과목코드 0(통합) 이 첫 판정. 아래 두 판정은 옛 키 호환용
+  if (kc && kc.digit === '0') return DSN.QTYPE_RULES_2028;
   const m = String(key ?? '').match(KEY_2028_RE);
   if (m && Number(m[1]) >= 27) return DSN.QTYPE_RULES_2028;
   if (DS_SETS_2028_ === null) ds_loadSets2028_();
@@ -136,11 +150,13 @@ function qtypeFromNum_(num, rules) {
  */
 function ds_expectedType_(key, raw) {
   const warn = [];
-  const m = String(key ?? '').match(KEY_RE);
-  if (!m) return { subject: null, keyNum: null, printedNum: null, num: null, expected: null, warn: ['KEY_NO_MATCH'] };
-  const subject = m[1], keyNum = Number(m[2]);
+  const kc = ds_keyCode_(key);
+  if (!kc) return { subject: null, keyNum: null, printedNum: null, num: null, expected: null, warn: ['KEY_NO_MATCH'] };
+  const subject = kc.subject, keyNum = kc.num;
   const pm = String(raw ?? '').match(PRINTED_NUM_RE);
   const printedNum = pm ? Number(pm[1] || pm[2]) : null;
+  // renual P3(§5): 문제집(9순번·9기출)은 번호로 유형을 정하지 않는다 → 파싱 결과만으로 판정(현행 폴백과 같은 길)
+  if (kc.kind === 'book') return { subject, keyNum, printedNum, num: keyNum, expected: null, warn: ['NUM_RULE_NONE'] };
   const rules = ds_qtypeRules_(key);                       // 2028 통합형 세트는 번호 규칙이 다르다
   let num = keyNum;
   if (printedNum != null && printedNum !== keyNum && qtypeFromNum_(printedNum, rules)) {

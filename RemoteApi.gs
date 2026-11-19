@@ -15,7 +15,7 @@
  */
 
 const RAPI = {
-  VERSION:    'latex-kice-1.1.3',   // 1.1.3 = 정답 추출 보완(원본 latex-1.2.3 과 같은 변경) / 1.1.2 = 2028 서킷 틀(세트 구성)도 통합형 번호 규칙(원본 latex-1.2.2 와 같은 변경) / 1.1.1 = 통합형(27~) 번호 규칙·renorm 명령. 2026-11-17: 원본 latex-1.2.0 반영(postfix 단계·식 번호 원문자 정본). KICE 사본(계획서 v5 §6-4): 원본 + ①입력 폴더 속성 ②PDF 전체검색 끔 ③problemOnly ④아카이브 접두. 이하 원본 이력 — 패치 14: 그림 URL \& 복원(2026-11-08) · 패치 13 (대량 변환 v4): tick / resume / sheetcheck 추가, start 는 트리거를 걸지 않는다
+  VERSION:    'latex-kice-1.2.0',   // 1.2.0 = renual P3 키·번호 규칙만(원본 latex-1.3.0 의 normalizeProblem.gs·JangbuId.gs — 0통합·9순번·9기출, X-05) / 1.1.3 = 정답 추출 보완(원본 latex-1.2.3 과 같은 변경) / 1.1.2 = 2028 서킷 틀(세트 구성)도 통합형 번호 규칙(원본 latex-1.2.2 와 같은 변경) / 1.1.1 = 통합형(27~) 번호 규칙·renorm 명령. 2026-11-17: 원본 latex-1.2.0 반영(postfix 단계·식 번호 원문자 정본). KICE 사본(계획서 v5 §6-4): 원본 + ①입력 폴더 속성 ②PDF 전체검색 끔 ③problemOnly ④아카이브 접두. 이하 원본 이력 — 패치 14: 그림 URL \& 복원(2026-11-08) · 패치 13 (대량 변환 v4): tick / resume / sheetcheck 추가, start 는 트리거를 걸지 않는다
   PROJECT:    'latex-convert-kice',
   TOKEN_PROP: 'REMOTE_TOKEN',
   LOG_TAIL:   20,
