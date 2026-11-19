@@ -18,6 +18,7 @@
  *   「D조 문항장부」는 **세기만** 한다(장부는 세트 표기가 달라 이 규칙으로 못 바꾼다) — 1 이상이면 그 세트는 충돌로 멈춘다.
  *   Drive `PBMAI/IMAGE_FIG`(그림)·`PBMAI/IMAGE_DS`(크롭 — 장부 삽입도 이 폴더를 읽는다)는 파일 이름을 바꾼다(링크는 파일 ID 라 그대로).
  * 로그·보고 탭(Pipeline_Log·Pipeline_Report·KICE_Log·Migrate_27*)은 이력이라 손대지 않는다.
+ * 수식 칸은 쓰지 않는다: 칸별 수식은 '수식 셀'(충돌로 표시), 배열 수식이 펼친 영역(Data_Latex A:B ← Data1)은 건너뛴다(원본이 바뀌면 따라 바뀜).
  * 같은 세트 안에서 바뀐 번호가 겹치거나(`1공통14`+`3확통14`) 이미 `0통합NN` 이 있으면 충돌 → 사람 확인.
  *************************************************/
 
@@ -39,6 +40,9 @@ const M27 = {
   FOLDERS: ['PBMAI/IMAGE_FIG', 'PBMAI/IMAGE_DS'],
   SKIP_SHEET_RE: /Log|Report|^Migrate_27/i,
   BULK_MAX: 20000,           // 셀 수가 이보다 작으면 한 번에 읽는다(행·열 범위)
+  SPILL_MAX: 400000,         // 배열 수식 찾기: 1행~마지막 대상 행 × 1열~마지막 대상 열을 한 번에 읽는 상한
+  // 값을 펼치는 수식(배열 수식) — 그 영역 칸에 값을 쓰면 수식이 깨진다(「Latex 변환」 Data_Latex!A2 `=Data1!A2:B2943`, 11/20 실측)
+  SPILL_FN_RE: /ARRAYFORMULA|FILTER|QUERY|SORT|UNIQUE|IMPORTRANGE|SEQUENCE|FLATTEN|SPLIT|TRANSPOSE|\bMAP\b|BYROW|BYCOL|MAKEARRAY|\{/i,
   STATE_DONE: '적용됨',
 };
 
@@ -117,6 +121,25 @@ function m27_openStore_(store) {
   return store.id ? SpreadsheetApp.openById(store.id) : SpreadsheetApp.getActiveSpreadsheet();
 }
 
+function m27_colNum_(a) { let n = 0; for (const ch of String(a).toUpperCase()) n = n * 26 + ch.charCodeAt(0) - 64; return n; }
+/**
+ * 수식 2차원 배열(1행·1열부터) → 값을 펼칠 수 있는 영역 [{ fr, fc, lc }] (순수 함수).
+ *   `=시트!A2:B2943` 같은 범위 참조 → 폭 = 범위 열 수 · 배열 함수(ARRAYFORMULA·FILTER·{…} 등) → 오른쪽 끝까지(보수적)
+ *   그 밖의 칸별 수식(`=$A$1&"_"&C2`)은 영역이 아니다(그 칸만 수식 — 따로 건너뛴다).
+ */
+function m27_spillAreas_(fx) {
+  const out = [];
+  (fx || []).forEach((row, i) => (row || []).forEach((f, j) => {
+    f = String(f || '');
+    if (!f || f.charAt(0) !== '=') return;
+    const ref = f.match(/^=\s*(?:(?:'[^']*'|[^!'"]+)!)?\$?([A-Z]{1,3})\$?\d*\s*:\s*\$?([A-Z]{1,3})\$?\d*\s*$/i);
+    if (ref) { const a = m27_colNum_(ref[1]), b = m27_colNum_(ref[2]); out.push({ fr: i + 1, fc: j + 1, lc: j + 1 + Math.abs(b - a) }); return; }
+    if (M27.SPILL_FN_RE.test(f)) out.push({ fr: i + 1, fc: j + 1, lc: Infinity });
+  }));
+  return out;
+}
+function m27_inSpill_(areas, r, c) { return areas.some(a => r >= a.fr && c >= a.fc && c <= a.lc); }
+
 /** 한 저장소에서 세트의 바꿀 셀 목록. [{ store, ssId, sheet, row, col, old, neu, hits }] · formulas(건너뛴 수식 셀 수) */
 function m27_scanStore_(ss, store, set) {
   const found = {};          // sheet → { 'r,c': true }
@@ -128,7 +151,7 @@ function m27_scanStore_(ss, store, set) {
     });
   });
   const out = [];
-  let formulas = 0;
+  let formulas = 0, spilled = 0;
   const ssId = store.id || ss.getId();
   Object.keys(found).forEach(name => {
     const { sh, cells } = found[name];
@@ -141,6 +164,11 @@ function m27_scanStore_(ss, store, set) {
       const rg = sh.getRange(r0, c0, r1 - r0 + 1, c1 - c0 + 1);
       vals = rg.getValues(); fx = rg.getFormulas();
     }
+    let areas = [];
+    if (r1 * c1 <= M27.SPILL_MAX) areas = m27_spillAreas_(sh.getRange(1, 1, r1, c1).getFormulas());
+    else rc.map(x => x[1]).filter((c, i, a) => a.indexOf(c) === i).forEach(c => {          // 너무 크면 대상 열만
+      m27_spillAreas_(sh.getRange(1, c, r1, 1).getFormulas()).forEach(a => areas.push({ fr: a.fr, fc: c, lc: a.lc === Infinity ? Infinity : c + (a.lc - a.fc) }));
+    });
     const valAt = (r, c) => vals ? vals[r - r0][c - c0] : sh.getRange(r, c).getValue();
     const fxAt = (r, c) => fx ? fx[r - r0][c - c0] : sh.getRange(r, c).getFormula();
     const seen = {};
@@ -148,6 +176,7 @@ function m27_scanStore_(ss, store, set) {
       seen[r + ',' + c] = true;
       const v = valAt(r, c);
       if (typeof v !== 'string') return;
+      if (m27_inSpill_(areas, r, c)) { if (m27_replace_(v, set).hits.length) spilled++; return; }   // 배열 수식이 펼친 칸 — 원본이 바뀌면 따라 바뀐다
       if (fxAt(r, c)) { if (m27_replace_(v, set).hits.length) formulas++; return; }
       const res = m27_replace_(v, set);
       if (res.hits.length && res.text !== v) out.push({ store: store.key, ssId, sheet: name, row: r, col: c, old: v, neu: res.text, hits: res.hits });
@@ -157,12 +186,13 @@ function m27_scanStore_(ss, store, set) {
         if (seen[r + ',' + grp.groupCol]) return;
         const v = valAt(r, grp.groupCol), b = m27_bareGroup_(v);
         if (!b) return;
+        if (m27_inSpill_(areas, r, grp.groupCol)) { spilled++; return; }
         if (fxAt(r, grp.groupCol)) { formulas++; return; }
         out.push({ store: store.key, ssId, sheet: name, row: r, col: grp.groupCol, old: v, neu: b.text, hits: [b.hit] });
       });
     }
   });
-  return { cells: out.sort((a, b) => a.sheet < b.sheet ? -1 : a.sheet > b.sheet ? 1 : a.row - b.row || a.col - b.col), formulas };
+  return { cells: out.sort((a, b) => a.sheet < b.sheet ? -1 : a.sheet > b.sheet ? 1 : a.row - b.row || a.col - b.col), formulas, spilled };
 }
 
 function m27_folder_(path) {
@@ -191,13 +221,13 @@ function m27_scanDrive_(set, folders) {
 /** 세트 하나 전수 조사 → { set, cells, files, counts{store…, drive}, formulas, conflicts[] } */
 function m27_scanSet_(set, ctx, existingNew) {
   const counts = {}, cells = [], allHits = [];
-  let formulas = 0;
+  let formulas = 0, spilled = 0;
   M27.STORES.forEach(store => {
     const ss = ctx.ss[store.key];
     if (!ss) { counts[store.key] = null; return; }
     const r = m27_scanStore_(ss, store, set);
     counts[store.key] = r.cells.length;
-    formulas += r.formulas;
+    formulas += r.formulas; spilled += r.spilled;
     r.cells.forEach(c => c.hits.forEach(h => allHits.push(h)));
     if (!store.countOnly) r.cells.forEach(c => cells.push(c));
   });
@@ -207,7 +237,7 @@ function m27_scanSet_(set, ctx, existingNew) {
   const conflicts = m27_conflicts_(allHits, existingNew);
   M27.STORES.forEach(s => { if (s.countOnly && counts[s.key]) conflicts.push(`${s.key} ${counts[s.key]}셀 — 이 도구로 못 바꿈(장부 메뉴 필요)`); });
   if (formulas) conflicts.push(`수식 셀 ${formulas}개(건너뜀)`);
-  return { set, cells, files, counts, formulas, conflicts };
+  return { set, cells, files, counts, formulas, spilled, conflicts };
 }
 
 function m27_context_() {
@@ -273,9 +303,10 @@ function m27_surveyCore_(sets) {
     if (!prev) row[C.ok - 1] = false;
     if (String(row[C.state - 1]) !== M27.STATE_DONE) row[C.state - 1] = '조사됨';
     row[C.surveyed - 1] = now;
+    if (String(row[C.state - 1]) !== M27.STATE_DONE) row[C.note - 1] = r.spilled ? `배열 수식 영역 ${r.spilled}칸 건너뜀(원본 탭을 바꾸면 따라 바뀜)` : '';
     if (prev) sh.getRange(prev.row, 1, 1, row.length).setValues([row]);
     else { sh.appendRow(row); table[c.set] = { row: sh.getLastRow(), values: row }; }
-    return { set: c.set, reason: c.reason, oldKeys: c.oldKeys, counts: r.counts, conflicts: r.conflicts, state: row[C.state - 1] };
+    return { set: c.set, reason: c.reason, oldKeys: c.oldKeys, counts: r.counts, spilled: r.spilled, conflicts: r.conflicts, state: row[C.state - 1] };
   });
   try { const last = sh.getLastRow(); if (last >= 2) sh.getRange(2, M27.COL.ok, last - 1, 1).insertCheckboxes(); } catch (_) {}
   return { ok: ctx.errors.length === 0, sets: res, errors: ctx.errors };
