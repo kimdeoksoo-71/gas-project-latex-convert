@@ -20,6 +20,11 @@ function onOpen() {
   mainMenu.addSeparator();
   mainMenu.addItem('🔗 문항장부 ID 채우기 (Data_DS L열)', 'jb_backfillFromLedger');   // Phase 72 (JangbuId.gs)
   mainMenu.addSeparator();
+  mainMenu.addSubMenu(ui.createMenu('27 계열 키 이관')   // 2026-11-20 renual X-06 (Migrate27.gs)
+    .addItem('① 조사 (쓰기 없음 → Migrate_27)', 'm27_surveyMenu')
+    .addItem('③ 적용 (승인 칸 체크된 세트)', 'm27_applyMenu')
+    .addItem('④ 되돌리기 (세트명)', 'm27_undoMenu'));
+  mainMenu.addSeparator();
 
   // 5. 서브메뉴 A
   const subMenuA = ui.createMenu('Latex 변환')

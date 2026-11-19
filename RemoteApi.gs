@@ -15,7 +15,7 @@
  */
 
 const RAPI = {
-  VERSION:    'latex-1.3.0',   // 1.3.0 = renual P3(2026-11-19): 키 규칙 0통합·9순번·9기출 · Sets 시트(_set.json·start profile) · 정답표 우선 · 해설 없음 세트 문제만 행 · status sets · imagecheck sets / 1.2.3 = 정답 추출: 키워드와 다른 줄의 값은 그 줄이 정답 하나뿐일 때만(7406 "정답⏎2 이상의…") / 1.2.2 = 2028 서킷 틀(세트 구성: 공통 14~20 · 확통 26~28)도 통합형 번호 규칙 / 1.2.1 = 2028 통합형(27~) 번호 규칙·renorm 명령 / 1.2.0 = postfix 단계(PostProcess.gs)·식 번호 원문자 정본(MathpixTagNormalize 반대 방향)·정규화 첫 줄 \section* · 이하 이력 — 패치 14: 그림 URL \& 복원(2026-11-08) · 패치 13 (대량 변환 v4): tick / resume / sheetcheck 추가, start 는 트리거를 걸지 않는다
+  VERSION:    'latex-1.3.1',   // 1.3.1 = X-06 27 계열 키 이관(Migrate27.gs · migrate27 명령 · 메뉴) / 1.3.0 = renual P3(2026-11-19): 키 규칙 0통합·9순번·9기출 · Sets 시트(_set.json·start profile) · 정답표 우선 · 해설 없음 세트 문제만 행 · status sets · imagecheck sets / 1.2.3 = 정답 추출: 키워드와 다른 줄의 값은 그 줄이 정답 하나뿐일 때만(7406 "정답⏎2 이상의…") / 1.2.2 = 2028 서킷 틀(세트 구성: 공통 14~20 · 확통 26~28)도 통합형 번호 규칙 / 1.2.1 = 2028 통합형(27~) 번호 규칙·renorm 명령 / 1.2.0 = postfix 단계(PostProcess.gs)·식 번호 원문자 정본(MathpixTagNormalize 반대 방향)·정규화 첫 줄 \section* · 이하 이력 — 패치 14: 그림 URL \& 복원(2026-11-08) · 패치 13 (대량 변환 v4): tick / resume / sheetcheck 추가, start 는 트리거를 걸지 않는다
   PROJECT:    'latex-convert',
   TOKEN_PROP: 'REMOTE_TOKEN',
   LOG_TAIL:   20,
@@ -37,6 +37,7 @@ function doGet(e) {
       case 'imagecheck': return rapi_json_(rapi_imagecheck_(p));
       case 'postfix':    return rapi_json_(rapi_postfix_(p));          // 2026-11-17: 기존 행 후처리·점검 (PostProcess.gs)
       case 'renorm':     return rapi_json_(rapi_renorm_(p));           // 2026-11-17: 기존 행 재정규화 → 정답 → 후처리
+      case 'migrate27':  return rapi_json_(rapi_migrate27_(p));        // 2026-11-20 renual 3단계 X-06 (Migrate27.gs)
       default:       return rapi_json_({ ok: false, reason: 'unknown cmd: ' + p.cmd });
     }
   } catch (err) {
@@ -146,6 +147,26 @@ function rapi_renorm_(p) {
   } finally {
     try { lock.releaseLock(); } catch (_) {}
   }
+}
+
+/**
+ * X-06 27 계열 키 이관 (2026-11-20, Migrate27.gs). action:
+ *   survey — 조사(쓰기는 Migrate_27 표만). sets(선택): JSON 배열 — 없으면 Data_DS 후보 전부
+ *   apply  — sets(필수, JSON 배열)를 승인 칸 체크 후 적용(덕수 세트 단위 승인을 받은 것만 부른다). by: 기록용 이름
+ *   undo   — set(세트명 하나)의 로그를 거꾸로 돌린다
+ */
+function rapi_migrate27_(p) {
+  const act = String(p.action || '');
+  let sets = null;
+  if (p.sets) { try { sets = JSON.parse(p.sets); } catch (_) { return { ok: false, reason: 'sets 는 JSON 배열' }; } if (!Array.isArray(sets)) return { ok: false, reason: 'sets 는 JSON 배열' }; }
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(PL.LOCK_WAIT_MS)) return { ok: false, reason: 'locked' };
+  try {
+    if (act === 'survey') return m27_surveyCore_(sets);
+    if (act === 'apply') { if (!sets || !sets.length) return { ok: false, reason: 'apply 는 sets 가 필요합니다' }; const by = '원격:' + String(p.by || '').slice(0, 40); return m27_applyCore_(sets, by, by); }
+    if (act === 'undo') { if (!p.set) return { ok: false, reason: 'undo 는 set 이 필요합니다' }; return m27_undoCore_(String(p.set), '원격:' + String(p.by || '').slice(0, 40)); }
+    return { ok: false, reason: 'action 은 survey · apply · undo' };
+  } finally { lock.releaseLock(); }
 }
 
 function rapi_ping_() {
