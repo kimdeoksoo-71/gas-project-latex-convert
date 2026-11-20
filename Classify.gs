@@ -17,6 +17,7 @@
  *
  * 메뉴(MainMenu.gs '분류(Meta)')  cl_setApiKey · cl_submitSelection · cl_submitPending · cl_pilotSubmit · cl_status · cl_stop · cl_undoRun
  * 원격(RemoteApi.gs)  cmd=classify&action=submit&keywords=…  (러너 classify 단계 — 제출만 하고 다음 단계로)
+ *                     cmd=classify&action=pilot[&run=<장부 파일럿 실행ID>]  (P4-1, 쓰기 없음)
  *                     cmd=classify&action=status
  *
  * 절대 하지 않는 것: Data_DS·장부 쓰기(읽기만) · 트리거 실행 중 getUi() · 공용 ScriptLock 오래 잡기.
@@ -1138,7 +1139,11 @@ function rapi_classify_(p) {
       last: PropertiesService.getScriptProperties().getProperty(CL.PROP_LAST) || '', apiKey: !!cl_apiKey_() };
   }
   if (action === 'stop') return cl_stopCore_();
-  if (action !== 'submit') return { ok: false, reason: 'action 은 submit | status | stop' };
+  if (action === 'pilot') {                                  // P4-1: 장부 v4 파일럿과 같은 행(Meta·장부 쓰기 없음, 로그만)
+    try { return cl_submitCore_({ mode: 'pilot', pilotRunId: String(p.run || CL.PILOT_RUN_DEFAULT), effort: p.effort || CL.EFFORT, by: '원격:' + String(p.by || 'clue') }); }
+    catch (e) { return { ok: false, reason: String(e && e.message || e) }; }
+  }
+  if (action !== 'submit') return { ok: false, reason: 'action 은 submit | pilot | status | stop' };
   const keywords = (typeof pl_parseKeywords_ === 'function') ? pl_parseKeywords_(p.keywords) : String(p.keywords || '').split(',').map(s => s.trim()).filter(Boolean);
   if (!keywords.length) return { ok: false, reason: 'keywords 가 필요합니다.' };
   const lock = LockService.getScriptLock();
