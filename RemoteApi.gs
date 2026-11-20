@@ -15,7 +15,7 @@
  */
 
 const RAPI = {
-  VERSION:    'latex-1.3.2',   // 1.3.2 = 이관 도구: 배열 수식이 펼친 영역(Data_Latex A:B)은 안 씀 / 1.3.1 = X-06 27 계열 키 이관(Migrate27.gs · migrate27 명령 · 메뉴) / 1.3.0 = renual P3(2026-11-19): 키 규칙 0통합·9순번·9기출 · Sets 시트(_set.json·start profile) · 정답표 우선 · 해설 없음 세트 문제만 행 · status sets · imagecheck sets / 1.2.3 = 정답 추출: 키워드와 다른 줄의 값은 그 줄이 정답 하나뿐일 때만(7406 "정답⏎2 이상의…") / 1.2.2 = 2028 서킷 틀(세트 구성: 공통 14~20 · 확통 26~28)도 통합형 번호 규칙 / 1.2.1 = 2028 통합형(27~) 번호 규칙·renorm 명령 / 1.2.0 = postfix 단계(PostProcess.gs)·식 번호 원문자 정본(MathpixTagNormalize 반대 방향)·정규화 첫 줄 \section* · 이하 이력 — 패치 14: 그림 URL \& 복원(2026-11-08) · 패치 13 (대량 변환 v4): tick / resume / sheetcheck 추가, start 는 트리거를 걸지 않는다
+  VERSION:    'latex-1.4.0',   // 1.4.0 = renual P4 분류(Classify.gs): Meta 시트 · classify 명령(배치 제출) · 메뉴 '분류(Meta)' / 1.3.2 = 이관 도구: 배열 수식이 펼친 영역(Data_Latex A:B)은 안 씀 / 1.3.1 = X-06 27 계열 키 이관(Migrate27.gs · migrate27 명령 · 메뉴) / 1.3.0 = renual P3(2026-11-19): 키 규칙 0통합·9순번·9기출 · Sets 시트(_set.json·start profile) · 정답표 우선 · 해설 없음 세트 문제만 행 · status sets · imagecheck sets / 1.2.3 = 정답 추출: 키워드와 다른 줄의 값은 그 줄이 정답 하나뿐일 때만(7406 "정답⏎2 이상의…") / 1.2.2 = 2028 서킷 틀(세트 구성: 공통 14~20 · 확통 26~28)도 통합형 번호 규칙 / 1.2.1 = 2028 통합형(27~) 번호 규칙·renorm 명령 / 1.2.0 = postfix 단계(PostProcess.gs)·식 번호 원문자 정본(MathpixTagNormalize 반대 방향)·정규화 첫 줄 \section* · 이하 이력 — 패치 14: 그림 URL \& 복원(2026-11-08) · 패치 13 (대량 변환 v4): tick / resume / sheetcheck 추가, start 는 트리거를 걸지 않는다
   PROJECT:    'latex-convert',
   TOKEN_PROP: 'REMOTE_TOKEN',
   LOG_TAIL:   20,
@@ -38,6 +38,7 @@ function doGet(e) {
       case 'postfix':    return rapi_json_(rapi_postfix_(p));          // 2026-11-17: 기존 행 후처리·점검 (PostProcess.gs)
       case 'renorm':     return rapi_json_(rapi_renorm_(p));           // 2026-11-17: 기존 행 재정규화 → 정답 → 후처리
       case 'migrate27':  return rapi_json_(rapi_migrate27_(p));        // 2026-11-20 renual 3단계 X-06 (Migrate27.gs)
+      case 'classify':   return rapi_json_(rapi_classify_(p));         // 2026-11-20 renual P4 분류(Meta) — Classify.gs
       default:       return rapi_json_({ ok: false, reason: 'unknown cmd: ' + p.cmd });
     }
   } catch (err) {

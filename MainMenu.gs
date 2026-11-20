@@ -24,6 +24,14 @@ function onOpen() {
     .addItem('① 조사 (쓰기 없음 → Migrate_27)', 'm27_surveyMenu')
     .addItem('③ 적용 (승인 칸 체크된 세트)', 'm27_applyMenu')
     .addItem('④ 되돌리기 (세트명)', 'm27_undoMenu'));
+  mainMenu.addSubMenu(ui.createMenu('분류 (Meta)')   // 2026-11-20 renual P4 (Classify.gs)
+    .addItem('🔑 API 키 저장 (이 프로젝트 · 내 계정)', 'cl_setApiKey')
+    .addItem('🏷 선택 행 분류 (Data_DS·Meta)', 'cl_submitSelection')
+    .addItem('🏷 Meta 대기 행 분류', 'cl_submitPending')
+    .addItem('🧪 파일럿 (장부 v4 파일럿 100행 · 쓰기 없음)', 'cl_pilotSubmit')
+    .addItem('📋 상태 / 지금 수거', 'cl_status')
+    .addItem('⏹ 중지', 'cl_stop')
+    .addItem('↩️ 실행 되돌리기', 'cl_undoRun'));
   mainMenu.addSeparator();
 
   // 5. 서브메뉴 A
